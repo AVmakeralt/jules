@@ -1,0 +1,36 @@
+-- tensor_ops.jules
+-- Demonstrates various tensor operations in Jules.
+
+-- Element-wise operations
+element_ops : [N]f32 -> [N]f32 -> [N]f32
+element_ops a b =
+    let sum = a + b
+    let diff = a - b
+    let prod = a * b
+    let quot = a / b
+    in prod
+
+-- Broadcasting: scalar + tensor
+broadcast : f32 -> [N]f32 -> [N]f32
+broadcast scalar vec = scalar + vec
+
+-- Matrix operations
+matrix_ops : [M, K]f32 -> [K, N]f32 -> [M, N]f32
+matrix_ops A B =
+    let C = A ** B
+    in relu(C)
+
+-- Reduction
+reductions : [N]f32 -> f32
+reductions x =
+    let m = mean(x)
+    let s = sum(x)
+    in m
+
+main : () -> f32
+main () =
+    let a = random([4, 3])
+    let b = random([3, 2])
+    let result = matrix_ops(a, b)
+    let reduced = mean(result)
+    in reduced

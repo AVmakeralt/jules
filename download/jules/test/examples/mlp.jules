@@ -1,0 +1,53 @@
+-- mlp.jules
+-- A two-layer Multi-Layer Perceptron with autodiff.
+-- Demonstrates function composition, multiple matmul operations,
+-- and gradient computation through a deeper network.
+
+-- First linear layer: [B, I] -> [B, H]
+linear1 : [B, I]f32 -> [I, H]f32 -> [H]f32 -> [B, H]f32
+linear1 X W1 b1 =
+    let h = relu(X ** W1 + b1)
+    in h
+
+-- Second linear layer: [B, H] -> [B, O]
+linear2 : [B, H]f32 -> [H, O]f32 -> [O]f32 -> [B, O]f32
+linear2 H W2 b2 =
+    let out = H ** W2 + b2
+    in out
+
+-- Full forward pass through both layers
+forward : [B, I]f32 -> [I, H]f32 -> [H]f32 -> [H, O]f32 -> [O]f32 -> [B, O]f32
+forward X W1 b1 W2 b2 =
+    let h = linear1(X, W1, b1)
+    in linear2(h, W2, b2)
+
+-- Cross-entropy loss (simplified as MSE for this example)
+loss : [B, O]f32 -> [B, O]f32 -> []f32
+loss predictions targets =
+    mean((predictions - targets) ^ 2)
+
+main : () -> []f32
+main () =
+    -- Input data
+    let X = random([64, 784])
+
+    -- Layer 1 weights: 784 -> 256
+    let W1 = random([784, 256])
+    let b1 = zeros([256])
+
+    -- Layer 2 weights: 256 -> 10
+    let W2 = random([256, 10])
+    let b2 = zeros([10])
+
+    -- Target labels
+    let Y = random([64, 10])
+
+    -- Forward pass
+    let predictions = forward(X, W1, b1, W2, b2)
+    let current_loss = loss(predictions, Y)
+
+    -- Compute gradients with respect to W1 and W2
+    let dW1 = grad(\W1 -> loss(forward(X, W1, b1, W2, b2), Y), W1)
+    let dW2 = grad(\W2 -> loss(forward(X, W1, b1, W2, b2), Y), W2)
+
+    in current_loss
