@@ -124,14 +124,17 @@ struct KernelRoutingPass
 
       // ── Pattern 1: MatMul + Activation ────────────────────────────────
       // jules.matmul → jules.relu/sigmoid/tanh → replace with extern_kernel
+      //
+      // FIX (Bug 6): Removed the hasOneUse() restriction. In real transformer
+      // models, the matmul result feeds into BOTH an activation AND a residual
+      // add. The old code required exactly one use, which prevented fusion in
+      // the most common model architectures. Now we look for an activation user
+      // among ALL users of the matmul result, not just when it's the sole user.
       if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
-        // Check if the matmul result has exactly one use that's an activation
-        if (!matmulOp.getResult().hasOneUse()) continue;
-
-        auto *user = *matmulOp.getResult().getUsers().begin();
-        const char *activation = activationToString(user);
-
-        if (activation) {
+        // Look for an activation user among all users of the matmul result.
+        for (auto *user : matmulOp.getResult().getUsers()) {
+          const char *activation = activationToString(user);
+          if (!activation) continue;
           // Check if the activation result type matches
           auto resultType = user->getResult(0).getType();
 
@@ -165,17 +168,17 @@ struct KernelRoutingPass
 
       // ── Pattern 2: MatMul + Bias + Activation ────────────────────────
       // jules.matmul → add(bias) → relu/sigmoid/tanh
+      //
+      // FIX (Bug 6): Also removed hasOneUse() here for the same reason —
+      // matmul results in real models often have multiple uses.
       if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
-        if (!matmulOp.getResult().hasOneUse()) continue;
-
-        auto *addUser = *matmulOp.getResult().getUsers().begin();
+        for (auto *addUser : matmulOp.getResult().getUsers()) {
         Value matmulResult, biasValue;
         if (!isBiasAdd(addUser, matmulResult, biasValue)) continue;
         if (matmulResult != matmulOp.getResult()) continue;
 
         // Now check if the add result feeds into an activation
-        if (!addUser->getResult(0).hasOneUse()) continue;
-        auto *actUser = *addUser->getResult(0).getUsers().begin();
+        for (auto *actUser : addUser->getResult(0).getUsers()) {
         const char *activation = activationToString(actUser);
         if (!activation) continue;
 
@@ -204,7 +207,9 @@ struct KernelRoutingPass
         replacedOps.insert(matmulOp);
         replacedOps.insert(addUser);
         replacedOps.insert(actUser);
-        continue;
+        goto next_op;  // Found a match, move to next op
+        }  // end for actUser
+        }  // end for addUser
       }
 
       // ── Pattern 3: Softmax routing ───────────────────────────────────
@@ -411,6 +416,7 @@ struct KernelRoutingPass
           continue;
         }
       }
+    next_op:;
     }
 
     // Erase replaced ops in reverse order (to avoid dangling references)

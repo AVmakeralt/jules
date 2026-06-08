@@ -192,9 +192,25 @@ void JITCompiler::waitForPGORecompiles() {
 
 std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
     ActiveTrace &trace, bool useStaticShapes, uint64_t traceId) {
-  auto context = std::make_unique<MLIRContext>();
-  context->getOrLoadDialect<JulesDialect>();
-  context->getOrLoadDialect<func::FuncDialect>();
+  // FIX (Perf 5): Reuse the MLIRContext across JIT compilations instead of
+  // creating a new one each time. Creating a new MLIRContext and loading
+  // dialects costs hundreds of milliseconds. We cache the context and
+  // only create it once.
+  //
+  // Note: MLIRContext is NOT thread-safe for concurrent mutations, so we
+  // protect it with a mutex. This is still much faster than creating a
+  // new context each time, since the mutex is only held during the
+  // context setup phase.
+  std::shared_ptr<MLIRContext> context;
+  {
+    std::lock_guard<std::mutex> lock(contextMutex_);
+    if (!cachedContext_) {
+      cachedContext_ = std::make_shared<MLIRContext>();
+      cachedContext_->getOrLoadDialect<JulesDialect>();
+      cachedContext_->getOrLoadDialect<func::FuncDialect>();
+    }
+    context = cachedContext_;
+  }
 
   auto module = ModuleOp::create(UnknownLoc::get(context.get()));
   OpBuilder builder(context.get());

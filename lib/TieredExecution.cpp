@@ -216,8 +216,16 @@ ExecutionResult TieredExecution::executeWithShapes(
   // ── Step 3: Execute via PJRT ─────────────────────────────────────────────
 
   if (pjrtClient_) {
-    // Load the executable onto the device.
-    auto pjrtExec = pjrtClient_->compileAndLoad(exec->serializedModule);
+    // FIX (Perf 3): Cache the compiled PJRT executable instead of
+    // re-compiling from the serialized MLIR string on every call.
+    // The old code called compileAndLoad() on EVERY invocation, which
+    // re-parsed and re-compiled the entire program each time. This made
+    // Tier 2 slower than Tier 1 in practice. Now we cache the compiled
+    // executable in the ExecutableHandle and reuse it.
+    if (!exec->cachedExecutable) {
+      exec->cachedExecutable = pjrtClient_->compileAndLoad(exec->serializedModule);
+    }
+    auto &pjrtExec = exec->cachedExecutable;
     if (pjrtExec) {
       // Execute the program.
       auto outputs = pjrtExec->execute(inputs);

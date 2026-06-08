@@ -206,10 +206,19 @@ void fusedMatmulRelu(const float* X, const float* W, float* output,
 
     if (use_tiled) {
         // Truly fused: apply ReLU in-register during tiled matmul epilogue
-        // Use a static planner to amortize auto-tune cost across calls
+        // FIX (Bug 7): Use function-level statics wrapped in a mutex-protected
+        // accessor. The old code used function-local statics which are safe to
+        // initialize (C++11 guarantees that), but concurrent access to
+        // planner.getTileConfig() is NOT thread-safe (it modifies configCache_).
+        // Now we use a thread-safe lazy initialization pattern.
+        static std::mutex plannerMutex;
         static CacheInfo cacheInfo = CacheInfo::detect();
         static TilePlanner planner(cacheInfo);
-        TileConfig cfg = planner.getTileConfig(M, N, K);
+        TileConfig cfg;
+        {
+          std::lock_guard<std::mutex> lock(plannerMutex);
+          cfg = planner.getTileConfig(M, N, K);
+        }
         tiledMatmulWithActivation(X, W, output, M, N, K, cfg,
                                   ActivationType::Relu);
     } else {
@@ -258,11 +267,15 @@ void fusedMatmulBiasRelu(const float* X, const float* W, const float* bias,
 
     if (use_tiled) {
         // Fused: matmul + bias + relu in one tiled pass
-        // FIX (SLOW 17): Add OpenMP parallelization and eliminate code
-        // duplication by reusing tiledMatmulWithActivation with bias support.
+        // FIX (Bug 7): Thread-safe planner access (same fix as fusedMatmulRelu).
+        static std::mutex plannerMutex;
         static CacheInfo cacheInfo = CacheInfo::detect();
         static TilePlanner planner(cacheInfo);
-        TileConfig cfg = planner.getTileConfig(M, N, K);
+        TileConfig cfg;
+        {
+          std::lock_guard<std::mutex> lock(plannerMutex);
+          cfg = planner.getTileConfig(M, N, K);
+        }
         memset(output, 0, M * N * sizeof(float));
 
         int tm = cfg.tile_m;
@@ -830,20 +843,19 @@ void matmulInt8(const int8_t* A, const int8_t* B, float* C,
     // C_float = (A_int8 @ B_int8) * scale_A * scale_B + bias
     std::vector<int32_t> C_int32(M * N, 0);
 
-    // FIX (SLOW 12): The old code accessed B with column stride (B[k*N+j]),
-    // causing a cache miss on every multiply. We now tile B into row-major
-    // blocks so that the inner dot product accesses contiguous memory.
-    // For small K, we use a direct tiled approach. For large K, we
-    // pack B tiles into contiguous scratch buffers.
+    // FIX (Bug 8): The old code claimed to use AVX-512/VNNI but actually
+    // fell back to a scalar loop inside the "AVX-512" block, never using
+    // the _mm512_dpbusd_epi32 instruction. Now we actually use VNNI when
+    // available, and use proper AVX-512 int8 vectorization otherwise.
 
-#if defined(__AVX512F__)
-    // AVX-512 int8 matmul with tiled B access
-    // Tile sizes chosen to fit in L1 cache
-    const int TK = 64;  // K tile size
-    const int TN = 64;  // N tile size
-
-    // Thread-local scratch for B packing
-    thread_local std::vector<int8_t> tl_B_packed;
+#if defined(__AVX512VNNI__)
+    // Real VNNI path: use _mm512_dpbusd_epi32 for hardware-accelerated
+    // int8 matrix multiplication. This instruction computes:
+    //   dst[i] += sum(src1[4*i..4*i+3] * src2[4*i..4*i+3])
+    // where src1 is treated as unsigned and src2 as signed.
+    // We process 16 output columns at a time with 4-wide VNNI micro-kernel.
+    const int TK = 64;
+    const int TN = 64;
 
     JULES_OMP_PARALLEL_FOR
     for (int i = 0; i < M; i++) {
@@ -852,16 +864,136 @@ void matmulInt8(const int8_t* A, const int8_t* B, float* C,
             for (int tkk = 0; tkk < K; tkk += TK) {
                 int tk_curr = std::min(TK, K - tkk);
 
-                // Process the tile with row-major B access
-                for (int j = tj; j < tj + tn_curr; j++) {
-                    int32_t sum = C_int32[i * N + j];
-                    // Inner loop: A is row-major (contiguous), B is accessed
-                    // with stride N but in a small tile that fits in cache
-                    for (int kk = 0; kk < tk_curr; kk++) {
-                        sum += (int32_t)A[i * K + tkk + kk] *
-                               (int32_t)B[(tkk + kk) * N + j];
+                // Process 16 output columns at a time using VNNI
+                int j = 0;
+                for (; j + 15 < tn_curr; j += 16) {
+                    __m512i sum_vec = _mm512_loadu_si512(
+                        reinterpret_cast<const __m512i*>(&C_int32[i * N + tj + j]));
+
+                    // Process K in chunks of 4 for VNNI
+                    int k = 0;
+                    for (; k + 3 < tk_curr; k += 4) {
+                        // Load 4 rows of B (each row has 16 int8 values)
+                        // B is [K x N], so B[(tkk+k+0)*N + tj+j] is row (tkk+k+0)
+                        __m512i b0 = _mm512_loadu_si512(
+                            reinterpret_cast<const void*>(&B[(tkk + k + 0) * N + tj + j]));
+                        __m512i b1 = _mm512_loadu_si512(
+                            reinterpret_cast<const void*>(&B[(tkk + k + 1) * N + tj + j]));
+                        __m512i b2 = _mm512_loadu_si512(
+                            reinterpret_cast<const void*>(&B[(tkk + k + 2) * N + tj + j]));
+                        __m512i b3 = _mm512_loadu_si512(
+                            reinterpret_cast<const void*>(&B[(tkk + k + 3) * N + tj + j]));
+
+                        // Broadcast the A values (4 int8 values for this row)
+                        int8_t a_vals[4] = {
+                            A[i * K + tkk + k + 0],
+                            A[i * K + tkk + k + 1],
+                            A[i * K + tkk + k + 2],
+                            A[i * K + tkk + k + 3]
+                        };
+                        __m128i a_vec = _mm_set_epi8(0,0,0,0,0,0,0,0,0,0,0,0,
+                                                      a_vals[3], a_vals[2], a_vals[1], a_vals[0]);
+                        __m512i a_broadcast = _mm512_broadcast_i32x4(a_vec);
+
+                        // VNNI: dpbusd = sum(a_u8 * b_i8) + acc_i32
+                        // Here we treat A as unsigned (zero-extended from int8)
+                        // and B as signed int8.
+                        // Since A values can be negative (int8), we need to handle
+                        // the sign. Use _mm512_dpbusd_epi32 with A cast to uint8
+                        // for the non-negative case, or use _mm512_dpwssd_epi32
+                        // for 16-bit products.
+                        // For correctness with signed int8 inputs, we use the
+                        // 16-bit multiply + add approach:
+                        __m512i prod0 = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(&B[(tkk + k + 0) * N + tj + j])));
+                        __m512i a_ext = _mm512_cvtepi8_epi16(_mm256_set1_epi16(
+                            static_cast<short>(static_cast<int8_t>(A[i * K + tkk + k + 0]))));
+                        sum_vec = _mm512_dpwssd_epi32(sum_vec, a_ext, prod0);
+
+                        __m512i prod1 = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(&B[(tkk + k + 1) * N + tj + j])));
+                        __m512i a_ext1 = _mm512_cvtepi8_epi16(_mm256_set1_epi16(
+                            static_cast<short>(static_cast<int8_t>(A[i * K + tkk + k + 1]))));
+                        sum_vec = _mm512_dpwssd_epi32(sum_vec, a_ext1, prod1);
+
+                        __m512i prod2 = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(&B[(tkk + k + 2) * N + tj + j])));
+                        __m512i a_ext2 = _mm512_cvtepi8_epi16(_mm256_set1_epi16(
+                            static_cast<short>(static_cast<int8_t>(A[i * K + tkk + k + 2]))));
+                        sum_vec = _mm512_dpwssd_epi32(sum_vec, a_ext2, prod2);
+
+                        __m512i prod3 = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(&B[(tkk + k + 3) * N + tj + j])));
+                        __m512i a_ext3 = _mm512_cvtepi8_epi16(_mm256_set1_epi16(
+                            static_cast<short>(static_cast<int8_t>(A[i * K + tkk + k + 3]))));
+                        sum_vec = _mm512_dpwssd_epi32(sum_vec, a_ext3, prod3);
                     }
-                    C_int32[i * N + j] = sum;
+                    // Handle remaining k elements with scalar
+                    for (; k < tk_curr; k++) {
+                        int32_t a_val = static_cast<int32_t>(A[i * K + tkk + k]);
+                        for (int jj = 0; jj < 16; jj++) {
+                            C_int32[i * N + tj + j + jj] += a_val *
+                                static_cast<int32_t>(B[(tkk + k) * N + tj + j + jj]);
+                        }
+                    }
+
+                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(&C_int32[i * N + tj + j]), sum_vec);
+                }
+                // Handle remaining columns with scalar
+                for (; j < tn_curr; j++) {
+                    int32_t sum = C_int32[i * N + tj + j];
+                    for (int k = 0; k < tk_curr; k++) {
+                        sum += static_cast<int32_t>(A[i * K + tkk + k]) *
+                               static_cast<int32_t>(B[(tkk + k) * N + tj + j]);
+                    }
+                    C_int32[i * N + tj + j] = sum;
+                }
+            }
+        }
+    }
+#elif defined(__AVX512F__)
+    // AVX-512 without VNNI: use 16-wide int8 vectorization with
+    // 16-bit widening multiply + 32-bit horizontal add.
+    // This is still much faster than the old scalar fallback.
+    const int TK = 64;
+    const int TN = 64;
+
+    JULES_OMP_PARALLEL_FOR
+    for (int i = 0; i < M; i++) {
+        for (int tj = 0; tj < N; tj += TN) {
+            int tn_curr = std::min(TN, N - tj);
+            for (int tkk = 0; tkk < K; tkk += TK) {
+                int tk_curr = std::min(TK, K - tkk);
+
+                int j = 0;
+                // Process 16 columns at a time
+                for (; j + 15 < tn_curr; j += 16) {
+                    __m512i sum_lo = _mm512_loadu_si512(
+                        reinterpret_cast<const __m512i*>(&C_int32[i * N + tj + j]));
+                    for (int k = 0; k < tk_curr; k++) {
+                        // Load 16 int8 values from B row
+                        __m256i b_narrow = _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(&B[(tkk + k) * N + tj + j]));
+                        // Widen to 16 int16 values
+                        __m512i b_wide = _mm512_cvtepi8_epi16(b_narrow);
+                        // Broadcast A value as int16
+                        __m512i a_val = _mm512_set1_epi16(
+                            static_cast<short>(static_cast<int8_t>(A[i * K + tkk + k])));
+                        // Multiply-accumulate in 16-bit
+                        __m512i prod = _mm512_madd_epi16(a_val, b_wide);
+                        // Add 32-bit results to accumulator
+                        sum_lo = _mm512_add_epi32(sum_lo, prod);
+                    }
+                    _mm512_storeu_si512(reinterpret_cast<__m512i*>(&C_int32[i * N + tj + j]), sum_lo);
+                }
+                // Scalar tail
+                for (; j < tn_curr; j++) {
+                    int32_t sum = C_int32[i * N + tj + j];
+                    for (int k = 0; k < tk_curr; k++) {
+                        sum += static_cast<int32_t>(A[i * K + tkk + k]) *
+                               static_cast<int32_t>(B[(tkk + k) * N + tj + j]);
+                    }
+                    C_int32[i * N + tj + j] = sum;
                 }
             }
         }

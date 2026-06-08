@@ -145,6 +145,13 @@ private:
   std::shared_ptr<Executable> compileThroughMLIR(ActiveTrace &trace,
                                                    bool useStaticShapes,
                                                    uint64_t traceId);
+
+  /// FIX (Perf 5): Cached MLIRContext for reuse across JIT compilations.
+  /// Creating a new MLIRContext and loading dialects is expensive (hundreds
+  /// of milliseconds). The old code created a new one on every compile
+  /// call. Now we cache it and reuse it across compilations.
+  std::shared_ptr<mlir::MLIRContext> cachedContext_;
+  std::mutex contextMutex_;
 };
 
 } // namespace jules

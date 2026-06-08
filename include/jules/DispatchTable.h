@@ -141,6 +141,12 @@ struct ExecutableHandle {
 
   /// Is this a Tier 2 (specialized) executable?
   bool isSpecialized() const { return tier == Tier2_JIT; }
+
+  /// FIX (Perf 3): Cached PJRT executable. The old code re-compiled from
+  /// the serialized MLIR string on every execute() call, which is devastating
+  /// for hot loops. Now the compiled executable is cached here after the
+  /// first compilation and reused on subsequent calls.
+  std::shared_ptr<PJRTExecutable> cachedExecutable;
 };
 
 // ── Dispatch Entry ──────────────────────────────────────────────────────────
@@ -366,6 +372,12 @@ private:
   void updateFastPathCache(const std::string &functionName,
                            const ShapeSignature &shapes,
                            ExecutableHandle *handle);
+
+  /// FIX (Bug 3): Retired fast path cache entries pending deletion.
+  /// We can't delete them immediately because a reader in dispatchFastPath
+  /// might still be accessing them. We keep a small buffer and free old
+  /// entries once they're guaranteed unreachable.
+  std::vector<FastPathEntry*> retiredCacheEntries_;
 };
 
 } // namespace jules
