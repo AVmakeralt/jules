@@ -13,4 +13,5 @@
 #define GET_OP_LIST ConstantOp, AddOp, SubOp, MulOp, DivOp, PowOp, NegOp, \
     MatMulOp, ReluOp, SigmoidOp, TanhOp, MeanOp, SumOp, ZerosOp, OnesOp, \
     RandomOp, CastOp, GradOp, TransposeOp, ReshapeOp, ConcatOp, SliceOp, \
-    SelectOp, CmpOp
+    SelectOp, CmpOp, LogOp, PadOp, BroadcastInDimOp, ReduceOp, WhileOp, \
+    ParallelOp, ExternKernelOp

@@ -492,3 +492,151 @@ LogicalResult SliceOp::verify() {
   }
   return ::llvm::SmallVector<Type, 1>();
 }
+
+//===----------------------------------------------------------------------===//
+// jules.log
+//===----------------------------------------------------------------------===//
+
+::llvm::SmallVector<Type, 1> LogOp::inferReturnTypes(
+    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, RegionRange regions,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  // log preserves the input type.
+  inferredReturnTypes.push_back(operands[0].getType());
+  return ::llvm::SmallVector<Type, 1>();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.pad
+//===----------------------------------------------------------------------===//
+
+LogicalResult PadOp::verify() {
+  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
+  auto padValueType = getPaddingValue().getType().dyn_cast<RankedTensorType>();
+  if (!inputType) {
+    return emitOpError("pad requires ranked tensor input");
+  }
+  // The padding_value must be a scalar tensor.
+  if (padValueType && padValueType.getRank() != 0) {
+    return emitOpError("padding_value must be a scalar tensor");
+  }
+  // Check that padding attributes have the correct size (one entry per dim).
+  auto rank = inputType.getRank();
+  if (static_cast<int64_t>(getPaddingLow().size()) != rank) {
+    return emitOpError("padding_low size must match input rank");
+  }
+  if (static_cast<int64_t>(getPaddingHigh().size()) != rank) {
+    return emitOpError("padding_high size must match input rank");
+  }
+  if (static_cast<int64_t>(getInteriorPadding().size()) != rank) {
+    return emitOpError("interior_padding size must match input rank");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.broadcast_in_dim
+//===----------------------------------------------------------------------===//
+
+LogicalResult BroadcastInDimOp::verify() {
+  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
+  auto resultType = getResult().getType().dyn_cast<RankedTensorType>();
+  if (!inputType || !resultType) {
+    return emitOpError("broadcast_in_dim requires ranked tensor operands");
+  }
+  auto broadcastDims = getBroadcastDimensions();
+  if (static_cast<int64_t>(broadcastDims.size()) != inputType.getRank()) {
+    return emitOpError("broadcast_dimensions size must match input rank");
+  }
+  // Verify that each broadcast dimension is within the result rank.
+  for (auto attr : broadcastDims) {
+    int64_t dim = attr.cast<IntegerAttr>().getInt();
+    if (dim < 0 || dim >= resultType.getRank()) {
+      return emitOpError("broadcast dimension out of range");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.reduce
+//===----------------------------------------------------------------------===//
+
+LogicalResult ReduceOp::verify() {
+  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
+  if (!inputType) {
+    return emitOpError("reduce requires ranked tensor input");
+  }
+  auto &body = getBody();
+  if (body.empty()) {
+    return emitOpError("reduce must have a non-empty body region");
+  }
+  if (body.getNumArguments() != 2) {
+    return emitOpError("reduce body must take exactly 2 arguments "
+                       "(accumulator, element)");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.while
+//===----------------------------------------------------------------------===//
+
+LogicalResult WhileOp::verify() {
+  auto &condRegion = getCond();
+  auto &bodyRegion = getBody();
+
+  // The condition region must produce a single i1 or tensor<i1> result.
+  if (condRegion.empty()) {
+    return emitOpError("while must have a non-empty condition region");
+  }
+  if (bodyRegion.empty()) {
+    return emitOpError("while must have a non-empty body region");
+  }
+
+  // The condition region should have the same number of arguments as
+  // carried variables.
+  auto numCarriedVars = getCarriedVars().size();
+  if (condRegion.getNumArguments() != numCarriedVars) {
+    return emitOpError("condition region argument count must match "
+                       "carried variable count");
+  }
+  if (bodyRegion.getNumArguments() != numCarriedVars) {
+    return emitOpError("body region argument count must match "
+                       "carried variable count");
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.parallel
+//===----------------------------------------------------------------------===//
+
+LogicalResult ParallelOp::verify() {
+  if (getLowerBound() < 0) {
+    return emitOpError("lower bound must be non-negative");
+  }
+  if (getUpperBound() < getLowerBound()) {
+    return emitOpError("upper bound must be >= lower bound");
+  }
+  if (getStep() <= 0) {
+    return emitOpError("step must be positive");
+  }
+  auto &bodyRegion = getBody();
+  if (bodyRegion.empty()) {
+    return emitOpError("parallel must have a non-empty body region");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// jules.extern_kernel
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExternKernelOp::verify() {
+  if (getKernelName().empty()) {
+    return emitOpError("kernel_name must not be empty");
+  }
+  return success();
+}

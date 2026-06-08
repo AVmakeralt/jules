@@ -172,10 +172,16 @@ bool Compiler::runAutodiffPass() {
 
   PassManager pm(mlirContext_.get());
   pm.addPass(createShapeInferencePass());
-  pm.addPass(createAutodiffPass());
 
-  if (options_.enableAutodiffPruning) {
-    pm.addPass(createAutodiffPruningPass());
+  if (options_.enableFusedAutodiff) {
+    // Use the fused autodiff+pruning+collapsing pass for minimal IR bloat.
+    pm.addPass(createFusedAutodiffPass());
+  } else {
+    pm.addPass(createAutodiffPass());
+
+    if (options_.enableAutodiffPruning) {
+      pm.addPass(createAutodiffPruningPass());
+    }
   }
 
   if (failed(pm.run(*mlirModule_))) {
@@ -191,8 +197,12 @@ bool Compiler::runAOTOptimizations() {
 
   PassManager pm(mlirContext_.get());
 
-  // ── Phase 1: Shape Inference ─────────────────────────────────────────────
+  // ── Phase 1: Shape Inference + Polymorphism ──────────────────────────────
   pm.addPass(createShapeInferencePass());
+
+  if (options_.enableShapePolymorphism) {
+    pm.addPass(createShapePolymorphismPass());
+  }
 
   // ── Phase 2: Graph Collapsing ───────────────────────────────────────────
   if (options_.enableGraphCollapsing) {
@@ -202,7 +212,7 @@ bool Compiler::runAOTOptimizations() {
   // ── Phase 3: Whole-Program Collapsing ───────────────────────────────────
   pm.addPass(createWholeProgramCollapsingPass());
 
-  // ── Phase 4: SCCP (Constant Propagation) ────────────────────────────────
+  // ── Phase 4: SCCP (Constant Propagation with Tensor Consteval) ──────────
   if (options_.enableSCCP) {
     pm.addPass(createSCCPPass());
   }
@@ -215,17 +225,41 @@ bool Compiler::runAOTOptimizations() {
   // ── Phase 6: Algebraic Simplification ───────────────────────────────────
   pm.addPass(createAlgebraicSimplificationPass());
 
-  // ── Phase 7: SIMD Layout Optimization ───────────────────────────────────
+  // ── Phase 7: Mixed Precision (bf16/fp8) ─────────────────────────────────
+  if (options_.enableMixedPrecision) {
+    pm.addPass(createMixedPrecisionPass(options_.mixedPrecisionTarget));
+  }
+
+  // ── Phase 8: SIMD Layout Optimization ───────────────────────────────────
   if (options_.enableSIMDLayout) {
     pm.addPass(createSIMDLayoutPass());
   }
 
-  // ── Phase 8: Polyhedral Optimization ────────────────────────────────────
+  // ── Phase 9: Kernel Fusion ──────────────────────────────────────────────
+  if (options_.enableKernelFusion) {
+    pm.addPass(createProducerConsumerFusionPass());
+  }
+
+  // ── Phase 10: Memory Planning ───────────────────────────────────────────
+  if (options_.enableMemoryPlanning) {
+    if (options_.memoryBudgetBytes > 0) {
+      pm.addPass(createMemoryPlanningPass(options_.memoryBudgetBytes));
+    } else {
+      pm.addPass(createMemoryPlanningPass());
+    }
+  }
+
+  // ── Phase 11: Polyhedral Optimization ───────────────────────────────────
   if (options_.enablePolyhedral) {
     pm.addPass(createPolyhedralOptPass());
   }
 
-  // ── Phase 9: Final Cleanup ──────────────────────────────────────────────
+  // ── Phase 12: Quantization ──────────────────────────────────────────────
+  if (options_.enableQuantization) {
+    pm.addPass(createQuantizePass());
+  }
+
+  // ── Phase 13: Final Cleanup ─────────────────────────────────────────────
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 

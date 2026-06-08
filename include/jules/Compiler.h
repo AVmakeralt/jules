@@ -107,11 +107,41 @@ struct CompilerOptions {
   /// Whether to enable polyhedral (affine) optimization.
   bool enablePolyhedral = true;
 
+  /// Whether to enable producer-consumer kernel fusion.
+  bool enableKernelFusion = true;
+
+  /// Whether to enable memory planning (buffer reuse, in-place ops).
+  bool enableMemoryPlanning = true;
+
+  /// Whether to enable mixed precision (bf16/fp8) optimization.
+  bool enableMixedPrecision = false;
+
+  /// Target precision for mixed precision ("bf16" or "fp8").
+  std::string mixedPrecisionTarget = "bf16";
+
+  /// Whether to enable shape polymorphism (symbolic dimension constraints).
+  bool enableShapePolymorphism = true;
+
+  /// Whether to enable quantization pass.
+  bool enableQuantization = false;
+
+  /// Whether to use the fused autodiff pass (autodiff+pruning+collapsing in one).
+  bool enableFusedAutodiff = true;
+
+  /// Whether to enable polyhedral optimization on the backward pass.
+  bool enableBackwardPolyhedral = true;
+
   /// Whether to inject telemetry hooks for PGO profiling.
   bool injectTelemetryHooks = true;
 
   /// Number of JIT worker threads.
   unsigned jitWorkers = 2;
+
+  /// Memory budget in bytes for memory planning (0 = unlimited).
+  uint64_t memoryBudgetBytes = 0;
+
+  /// Whether to use the LLVM backend instead of the interpreter.
+  bool useLLVMBackend = true;
 };
 
 /// The main compiler driver.

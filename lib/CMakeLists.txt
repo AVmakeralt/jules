@@ -40,6 +40,21 @@ if(JULES_ENABLE_MLIR)
     MLIRBufferizationDialect
     MLIRMathDialect
     MLIROpenMP
+    # LLVM Backend: conversion + JIT libraries
+    MLIRArithToLLVM
+    MLIRFuncToLLVM
+    MLIRMemRefToLLVM
+    MLIRSCFToControlFlow
+    MLIRControlFlowToLLVM
+    MLIRMathToLLVM
+    MLIRIndexToLLVM
+    MLIRVectorToLLVM
+    MLIRLLVMCommon
+    MLIRTargetLLVMIRExport
+    MLIRBuiltinToLLVMIR
+    LLVMOrcJIT
+    LLVMCore
+    LLVMSupport
   )
 
   if(StableHLO_FOUND)

@@ -363,4 +363,161 @@ def CmpOp : JulesOp<"cmp", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs `,` $comparison_direction attr-dict `:` type($result)";
 }
 
+//===----------------------------------------------------------------------===//
+// Element-wise unary math
+//===----------------------------------------------------------------------===//
+
+def LogOp : JulesOp<"log", [Pure, SameOperandsAndResultType]> {
+  let summary = "Element-wise natural logarithm";
+  let description = [{
+    Computes the element-wise natural logarithm of a tensor or scalar.
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Tensor padding
+//===----------------------------------------------------------------------===//
+
+def PadOp : JulesOp<"pad", [Pure]> {
+  let summary = "Tensor padding";
+  let description = [{
+    Pads a tensor with edge values or a constant along each dimension.
+    The padding_low and padding_high specify the number of elements to
+    pad on the low and high side of each dimension. The interior_padding
+    specifies the number of elements to insert between existing elements.
+  }];
+  let arguments = (ins AnyType:$input,
+                       AnyType:$padding_value,
+                       I64ArrayAttr:$padding_low,
+                       I64ArrayAttr:$padding_high,
+                       I64ArrayAttr:$interior_padding);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input `,` $padding_value `low` $padding_low `high` $padding_high `interior` $interior_padding attr-dict `:` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Broadcasting
+//===----------------------------------------------------------------------===//
+
+def BroadcastInDimOp : JulesOp<"broadcast_in_dim", [Pure]> {
+  let summary = "Broadcast tensor with explicit dimension mapping";
+  let description = [{
+    Broadcasts a tensor to a target shape using the given broadcast_dimensions.
+    The broadcast_dimensions array maps each dimension of the operand to a
+    dimension of the result. This is the same semantics as StableHLO's
+    broadcast_in_dim.
+  }];
+  let arguments = (ins AnyType:$input, I64ArrayAttr:$broadcast_dimensions);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input `,` $broadcast_dimensions attr-dict `:` type($input) `->` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Reduction with body
+//===----------------------------------------------------------------------===//
+
+def ReduceOp : JulesOp<"reduce", [Pure]> {
+  let summary = "Reduction with a body region";
+  let description = [{
+    Reduces a tensor along the given dimensions using a reduction body region.
+    The body region takes two arguments (accumulator, element) and returns
+    the updated accumulator.
+  }];
+  let arguments = (ins AnyType:$input, AnyType:$init_value, I64ArrayAttr:$dimensions);
+  let results = (outs AnyType:$result);
+  let regions = (region AnyRegion:$body);
+  let assemblyFormat = "$input `,` $init_value `dims` $dimensions attr-dict `:` type($input) $body";
+}
+
+//===----------------------------------------------------------------------===//
+// Control flow
+//===----------------------------------------------------------------------===//
+
+def WhileOp : JulesOp<"while", [HasParent<"func::FuncOp">]> {
+  let summary = "While loop with carried variables";
+  let description = [{
+    Executes a while loop: while(condition(carried_vars)) { body(carried_vars) }
+    The condition and body are regions. Carried variables are passed through
+    both regions and updated each iteration.
+  }];
+  let arguments = (ins Variadic<AnyType>:$carried_vars);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$cond, AnyRegion:$body);
+  let assemblyFormat = [{
+    `(` $carried_vars `:` type($carried_vars) `)` attr-dict
+    `cond` $cond `do` $body `:` type($results)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Parallel execution
+//===----------------------------------------------------------------------===//
+
+def ParallelOp : JulesOp<"parallel", [HasParent<"func::FuncOp">]> {
+  let summary = "Data-parallel execution primitive";
+  let description = [{
+    Executes a computation in parallel over a range of indices.
+    Maps to XLA's SPMD partitioner or shardy dialect.
+    Each index is independent — no cross-iteration dependencies.
+  }];
+  let arguments = (ins I64Attr:$lowerBound, I64Attr:$upperBound, I64Attr:$step);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region AnyRegion:$body);
+  let assemblyFormat = [{
+    $lowerBound `to` $upperBound `step` $step attr-dict `:` type($results) $body
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Fake quantization (quantization-aware training)
+//===----------------------------------------------------------------------===//
+
+def FakeQuantOp : JulesOp<"fake_quant", [Pure]> {
+  let summary = "Fake quantization for quantization-aware training";
+  let description = [{
+    Simulates the effect of quantization by quantizing to a lower-precision
+    integer type and dequantizing back. This allows the model to learn weights
+    that are robust to quantization noise during training.
+
+    Compute: round(input / scale + zero_point) * scale - zero_point * scale
+
+    In inference mode, this op is replaced with actual int8 CastOp + MatMulInt8.
+
+    Attributes:
+      scale:       The quantization scale factor (float64)
+      zero_point:  The quantization zero point (int64)
+      num_bits:    The bit width of the quantized type (int32, default 8)
+      per_channel: Whether to use per-channel quantization (bool, default false)
+      scales:      Per-channel scale factors (array of float64, used when per_channel=true)
+      zero_points: Per-channel zero points (array of int64, used when per_channel=true)
+  }];
+  let arguments = (ins AnyType:$input,
+                       F64Attr:$scale,
+                       I64Attr:$zero_point,
+                       I32Attr:$num_bits);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input `,` $scale `,` $zero_point `,` $num_bits attr-dict `:` type($input) `->` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Custom kernel injection
+//===----------------------------------------------------------------------===//
+
+def ExternKernelOp : JulesOp<"extern_kernel", [Pure]> {
+  let summary = "External kernel call";
+  let description = [{
+    Calls an external kernel function by name, bypassing the StableHLO path.
+    The kernel must be available as a shared library symbol or PJRT plugin.
+    Used for flash attention, sparse ops, custom reductions, etc.
+  }];
+  let arguments = (ins StrAttr:$kernel_name, Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$results);
+  let assemblyFormat = [{
+    $kernel_name `(` $inputs `:` type($inputs) `)` attr-dict `:` type($results)
+  }];
+}
+
 #endif // JULES_OPS

@@ -16,13 +16,11 @@
 //   Tier 1 (AOT): A generic, dynamic-shape binary that runs instantly
 //   Tier 2 (JIT): A specialized, static-shape XLA binary that runs faster
 //
-// The dispatch table is a lock-free hash map keyed by (function_name, shape).
-// When a Tier 2 binary is compiled in the background, it is atomically
-// inserted into the table, and subsequent calls with matching shapes bypass
-// the AOT tier entirely.
-//
-// If the shapes don't match any Tier 2 entry, execution falls back to
-// the AOT tier (bailout mechanism).
+// The dispatch table uses:
+//   - A hash-based lookup (ShapeSignatureHash) for O(1) exact shape matching
+//   - A radix-tree based prefix lookup for shape families (same leading dims)
+//   - A lock-free fast path (dispatchFastPath) using std::atomic + RCU-like
+//     pattern for the common case where Tier 2 entries exist
 //
 //===----------------------------------------------------------------------===//
 
@@ -74,6 +72,50 @@ struct ShapeSignature {
   };
 };
 
+// ── Shape Signature Hash (Improved) ─────────────────────────────────────────
+
+/// An improved hash function for shape signatures that provides better
+/// distribution and avalanche properties than the basic XOR-based hash.
+/// Uses FNV-1a mixing for each dimension value.
+struct ShapeSignatureHash {
+  /// FNV-1a offset basis and prime for 64-bit.
+  static constexpr uint64_t FNV_OFFSET = 14695981039346656037ULL;
+  static constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
+
+  size_t operator()(const ShapeSignature &sig) const {
+    uint64_t h = FNV_OFFSET;
+
+    // Hash the number of inputs first (helps distinguish different arities).
+    h ^= static_cast<uint64_t>(sig.inputShapes.size());
+    h *= FNV_PRIME;
+
+    for (const auto &shape : sig.inputShapes) {
+      // Hash the rank of each input.
+      h ^= static_cast<uint64_t>(shape.size());
+      h *= FNV_PRIME;
+
+      for (int64_t dim : shape) {
+        // Mix each dimension value using FNV-1a.
+        uint64_t dimBits = static_cast<uint64_t>(dim);
+        h ^= dimBits;
+        h *= FNV_PRIME;
+        // Extra mixing for better avalanche.
+        h ^= (dimBits >> 32);
+        h *= FNV_PRIME;
+      }
+    }
+
+    // Final avalanche mixing.
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+
+    return static_cast<size_t>(h);
+  }
+};
+
 // ── Executable Handle ───────────────────────────────────────────────────────
 
 /// A handle to a compiled executable, tagged with its tier.
@@ -123,6 +165,73 @@ struct DispatchEntry {
   std::atomic<uint64_t> bailoutCount{0};
 };
 
+// ── Radix Tree Node ─────────────────────────────────────────────────────────
+
+/// A node in the radix tree used for prefix-based shape family lookup.
+/// The radix tree groups shape signatures by their leading dimensions,
+/// enabling efficient lookup of all functions with the same batch or
+/// leading dimension sizes.
+class RadixTreeNode {
+public:
+  RadixTreeNode() = default;
+
+  /// Insert a shape signature into the radix tree.
+  /// \param sig     The shape signature to insert
+  /// \param depth   The current dimension depth (input index, dim index)
+  /// \param handle  The executable handle associated with this signature
+  void insert(const ShapeSignature &sig, ExecutableHandle *handle);
+
+  /// Look up all executables matching a prefix of the shape signature.
+  /// Returns all handles whose signatures share the same leading dimensions.
+  std::vector<ExecutableHandle*> prefixLookup(const ShapeSignature &sig,
+                                               size_t minPrefixLen = 1) const;
+
+  /// Look up an exact match.
+  ExecutableHandle* exactLookup(const ShapeSignature &sig) const;
+
+  /// Get the number of entries in this subtree.
+  size_t size() const;
+
+private:
+  /// The dimension value at this level of the radix tree.
+  /// -1 represents the root (no dimension value).
+  int64_t dimValue_ = -1;
+
+  /// Children indexed by dimension value.
+  /// Using unordered_map for O(1) child lookup.
+  std::unordered_map<int64_t, std::unique_ptr<RadixTreeNode>> children_;
+
+  /// The executable handle at this node (leaf nodes only).
+  ExecutableHandle *handle_ = nullptr;
+
+  /// Whether this node is a leaf (has an associated handle).
+  bool isLeaf_ = false;
+};
+
+// ── RCU Guard for Lock-Free Dispatch ─────────────────────────────────────────
+
+/// A simple RCU (Read-Copy-Update) guard for lock-free dispatch table reads.
+/// Writers publish new dispatch entries by atomically updating a pointer;
+/// readers access the table without locks. Old entries are retired and
+/// freed after a grace period.
+///
+/// This is a simplified userspace RCU implementation. In production,
+/// one would use liburcu or a similar library.
+class RCUGuard {
+public:
+  /// Enter an RCU read-side critical section.
+  static void readLock();
+
+  /// Exit an RCU read-side critical section.
+  static void readUnlock();
+
+  /// Retire an old dispatch entry (will be freed after a grace period).
+  static void retire(ExecutableHandle *handle);
+
+  /// Process retired entries (call periodically from a background thread).
+  static void quiesce();
+};
+
 // ── Dispatch Table ──────────────────────────────────────────────────────────
 
 /// The virtual dispatch table: routes function calls to the correct tier.
@@ -136,6 +245,10 @@ struct DispatchEntry {
 ///   3. If no, execute Tier 1 (generic, always works)
 ///   4. Record the shape observation for potential Tier 2 compilation
 ///
+/// The table supports three dispatch modes:
+///   - dispatch():           Standard mutex-protected dispatch
+///   - dispatchFastPath():   Lock-free dispatch using RCU-like pattern
+///   - dispatchByPrefix():   Radix-tree prefix lookup for shape families
 class DispatchTable {
 public:
   explicit DispatchTable(DiagnosticsEngine &diag);
@@ -156,11 +269,24 @@ public:
 
   // ── Dispatch ─────────────────────────────────────────────────────────────
 
-  /// Look up the best executable for a function call with the given shapes.
+  /// Standard dispatch: look up the best executable for a function call.
   /// Returns the Tier 2 executable if one exists for these exact shapes,
   /// otherwise returns the Tier 1 fallback.
   ExecutableHandle* dispatch(const std::string &functionName,
                               const ShapeSignature &shapes);
+
+  /// Lock-free fast-path dispatch using RCU-like pattern.
+  /// This avoids taking the mutex in the common case (Tier 2 hit).
+  /// Falls back to the mutex-protected path on miss.
+  ExecutableHandle* dispatchFastPath(const std::string &functionName,
+                                      const ShapeSignature &shapes);
+
+  /// Prefix-based dispatch using the radix tree.
+  /// Returns the best executable for a shape family (functions with
+  /// the same leading dimensions). Useful for batched workloads.
+  ExecutableHandle* dispatchByPrefix(const std::string &functionName,
+                                      const ShapeSignature &shapes,
+                                      size_t minPrefixLen = 1);
 
   /// Check if a Tier 2 executable exists for a function + shape combo.
   bool hasTier2(const std::string &functionName,
@@ -207,9 +333,10 @@ private:
 
   /// Per-function dispatch entries, keyed by shape signature.
   /// function_name -> (shape_signature -> dispatch entry)
+  /// Uses the improved ShapeSignatureHash for better distribution.
   using ShapeMap = std::unordered_map<ShapeSignature,
                                        std::shared_ptr<DispatchEntry>,
-                                       ShapeSignature::Hash>;
+                                       ShapeSignatureHash>;
   using FunctionMap = std::unordered_map<std::string, ShapeMap>;
 
   mutable std::mutex mutex_;
@@ -218,8 +345,27 @@ private:
   /// Tier 1 fallback executables per function.
   std::unordered_map<std::string, std::shared_ptr<ExecutableHandle>> tier1Fallbacks_;
 
+  /// Radix trees for prefix-based shape family lookup.
+  /// function_name -> radix tree root
+  std::unordered_map<std::string, std::unique_ptr<RadixTreeNode>> radixTrees_;
+
   /// Next executable ID.
   std::atomic<uint64_t> nextExecId_{1};
+
+  /// Atomic pointer to a read-only snapshot of the table, for RCU-like
+  /// lock-free dispatch. Updated by writers under the mutex; read by
+  /// dispatchFastPath without the mutex.
+  struct FastPathEntry {
+    std::string functionName;
+    ShapeSignature shapes;
+    ExecutableHandle *handle;
+  };
+  std::atomic<FastPathEntry*> fastPathCache_{nullptr};
+
+  /// Build/update the fast path cache entry for a function+shape combo.
+  void updateFastPathCache(const std::string &functionName,
+                           const ShapeSignature &shapes,
+                           ExecutableHandle *handle);
 };
 
 } // namespace jules

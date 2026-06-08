@@ -21,7 +21,10 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 
@@ -621,6 +624,295 @@ struct SliceOpLowering : public OpConversionPattern<SliceOp> {
   }
 };
 
+// ── LogOp ──────────────────────────────────────────────────────────────────
+
+struct LogOpLowering : public OpConversionPattern<LogOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(LogOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<stablehlo::LogOp>(
+        op, adaptor.getInput());
+    return success();
+  }
+};
+
+// ── PadOp ──────────────────────────────────────────────────────────────────
+
+struct PadOpLowering : public OpConversionPattern<PadOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(PadOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.pad -> stablehlo.pad
+    auto inputType = adaptor.getInput().getType().dyn_cast<RankedTensorType>();
+    if (!inputType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor input");
+    }
+
+    int64_t rank = inputType.getRank();
+
+    // Extract padding attributes.
+    auto extractI64Array = [](ArrayAttr arr) -> SmallVector<int64_t, 4> {
+      SmallVector<int64_t, 4> result;
+      for (auto attr : arr) {
+        result.push_back(attr.cast<IntegerAttr>().getInt());
+      }
+      return result;
+    };
+
+    auto paddingLow = extractI64Array(op.getPaddingLow());
+    auto paddingHigh = extractI64Array(op.getPaddingHigh());
+    auto interiorPadding = extractI64Array(op.getInteriorPadding());
+
+    // Create DenseI64ArrayAttr for each padding component.
+    auto paddingLowAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), paddingLow);
+    auto paddingHighAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), paddingHigh);
+    auto interiorPaddingAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), interiorPadding);
+
+    rewriter.replaceOpWithNewOp<stablehlo::PadOp>(
+        op, adaptor.getInput(), adaptor.getPaddingValue(),
+        paddingLowAttr, paddingHighAttr, interiorPaddingAttr);
+    return success();
+  }
+};
+
+// ── BroadcastInDimOp ───────────────────────────────────────────────────────
+
+struct BroadcastInDimOpLowering : public OpConversionPattern<BroadcastInDimOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(BroadcastInDimOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.broadcast_in_dim -> stablehlo.broadcast_in_dim
+    auto resultType = op.getResult().getType().dyn_cast<RankedTensorType>();
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor result");
+    }
+
+    // Extract broadcast dimensions.
+    auto broadcastDimsAttr = op.getBroadcastDimensions();
+    SmallVector<int64_t, 4> broadcastDims;
+    for (auto attr : broadcastDimsAttr) {
+      broadcastDims.push_back(attr.cast<IntegerAttr>().getInt());
+    }
+
+    auto dimsAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get(
+            {static_cast<int64_t>(broadcastDims.size())},
+            rewriter.getI64Type()),
+        broadcastDims);
+
+    rewriter.replaceOpWithNewOp<stablehlo::BroadcastInDimOp>(
+        op, adaptor.getInput(), dimsAttr);
+    return success();
+  }
+};
+
+// ── ReduceOp ───────────────────────────────────────────────────────────────
+
+struct ReduceOpLowering : public OpConversionPattern<ReduceOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ReduceOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.reduce -> stablehlo.reduce
+    auto inputType = adaptor.getInput().getType().dyn_cast<RankedTensorType>();
+    if (!inputType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor input");
+    }
+
+    // Extract reduction dimensions.
+    auto reduceDimsAttr = op.getDimensions();
+    SmallVector<int64_t, 4> reduceDims;
+    for (auto attr : reduceDimsAttr) {
+      reduceDims.push_back(attr.cast<IntegerAttr>().getInt());
+    }
+
+    auto dimsDenseAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get(
+            {static_cast<int64_t>(reduceDims.size())},
+            rewriter.getI64Type()),
+        reduceDims);
+
+    // Compute the result type (input with reduced dims removed).
+    SmallVector<int64_t, 4> resultShape;
+    llvm::SmallDenseSet<int64_t, 8> reduceDimSet(reduceDims.begin(),
+                                                   reduceDims.end());
+    for (int64_t d = 0; d < inputType.getRank(); ++d) {
+      if (!reduceDimSet.contains(d)) {
+        resultShape.push_back(inputType.getDimSize(d));
+      }
+    }
+    auto resultType = RankedTensorType::get(resultShape,
+                                             inputType.getElementType());
+
+    auto stableReduceOp = rewriter.create<stablehlo::ReduceOp>(
+        op.getLoc(),
+        TypeRange{resultType},
+        ValueRange{adaptor.getInput()},
+        ValueRange{adaptor.getInitValue()},
+        dimsDenseAttr);
+
+    // Clone the reducer body from the Jules reduce into the StableHLO reduce.
+    auto &srcBody = op.getBody();
+    auto &dstBody = stableReduceOp.getBody();
+    rewriter.cloneRegionBefore(srcBody, dstBody, dstBody.begin());
+
+    rewriter.replaceOp(op, stableReduceOp.getResult(0));
+    return success();
+  }
+};
+
+// ── WhileOp ────────────────────────────────────────────────────────────────
+
+struct WhileOpLowering : public OpConversionPattern<WhileOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(WhileOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.while -> stablehlo.while
+    //
+    // StableHLO's while op has the same structure:
+    //   stablehlo.while(carried_vars) cond { ... } do { ... }
+    //
+    // The condition region returns a single tensor<i1>.
+    // The body region returns the new carried variable values.
+    SmallVector<Type, 4> resultTypes;
+    for (auto result : op.getResults()) {
+      resultTypes.push_back(result.getType());
+    }
+
+    auto stableWhileOp = rewriter.create<stablehlo::WhileOp>(
+        op.getLoc(), resultTypes, adaptor.getCarriedVars());
+
+    // Clone the condition region.
+    auto &srcCond = op.getCond();
+    auto &dstCond = stableWhileOp.getCond();
+    rewriter.cloneRegionBefore(srcCond, dstCond, dstCond.begin());
+
+    // Clone the body region.
+    auto &srcBody = op.getBody();
+    auto &dstBody = stableWhileOp.getBody();
+    rewriter.cloneRegionBefore(srcBody, dstBody, dstBody.begin());
+
+    // Replace the while op results.
+    for (unsigned i = 0; i < op.getNumResults(); ++i) {
+      rewriter.replaceOp(op, stableWhileOp.getResults());
+    }
+    return success();
+  }
+};
+
+// ── ParallelOp ─────────────────────────────────────────────────────────────
+
+struct ParallelOpLowering : public OpConversionPattern<ParallelOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ParallelOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.parallel -> scf.parallel
+    //
+    // Since stablehlo doesn't have a direct parallel op, we lower to
+    // scf.parallel which represents an ordered parallel loop. The SCF
+    // dialect is a standard MLIR dialect that can be further lowered
+    // as needed by the XLA backend.
+    //
+    // scf.parallel has the form:
+    //   scf.parallel (%iv) = (%lb) to (%ub) step (%step) {
+    //     ... body ...
+    //   }
+
+    // Create the lower bound, upper bound, and step as index values.
+    auto lbIndex = rewriter.create<mlir::arith::ConstantOp>(
+        op.getLoc(), rewriter.getIndexAttr(op.getLowerBound()));
+    auto ubIndex = rewriter.create<mlir::arith::ConstantOp>(
+        op.getLoc(), rewriter.getIndexAttr(op.getUpperBound()));
+    auto stepIndex = rewriter.create<mlir::arith::ConstantOp>(
+        op.getLoc(), rewriter.getIndexAttr(op.getStep()));
+
+    SmallVector<Value, 1> lbs = {lbIndex.getResult()};
+    SmallVector<Value, 1> ubs = {ubIndex.getResult()};
+    SmallVector<Value, 1> steps = {stepIndex.getResult()};
+
+    // Collect result types for the parallel operation.
+    SmallVector<Type, 4> resultTypes;
+    for (auto result : op.getResults()) {
+      resultTypes.push_back(result.getType());
+    }
+
+    // Create zero init values for the parallel's reduction variables.
+    // Since jules.parallel represents independent iterations (not reductions),
+    // we don't have reduction variables. We use scf.parallel without
+    // reduction.
+    auto parallelOp = rewriter.create<mlir::scf::ParallelOp>(
+        op.getLoc(), lbs, ubs, steps);
+
+    // Clone the body region into the scf.parallel.
+    auto &srcBody = op.getBody();
+    auto &dstBody = parallelOp.getBody();
+    rewriter.cloneRegionBefore(srcBody, dstBody, dstBody.begin());
+
+    // scf.parallel doesn't produce results in the same way.
+    // For parallel ops that produce results, we would need to use
+    // scf.reduce or a different pattern. For now, we handle the
+    // common case of parallel execution without result aggregation.
+    rewriter.replaceOp(op, parallelOp.getResults());
+    return success();
+  }
+};
+
+// ── ExternKernelOp ─────────────────────────────────────────────────────────
+
+struct ExternKernelOpLowering : public OpConversionPattern<ExternKernelOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ExternKernelOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.extern_kernel -> stablehlo.custom_call
+    //
+    // The ExternKernelOp maps to StableHLO's custom_call op with the
+    // `call_target_name` attribute set to the kernel_name. This allows
+    // the kernel to be resolved as a PJRT plugin or shared library
+    // symbol at runtime.
+    //
+    // stablehlo.custom_call @kernel_name(inputs) -> results
+    //   {call_target_name = "kernel_name",
+    //    has_side_effect = false,
+    //    backend_config = ""}
+
+    // Collect result types.
+    SmallVector<Type, 4> resultTypes;
+    for (auto result : op.getResults()) {
+      resultTypes.push_back(result.getType());
+    }
+
+    // Collect input values.
+    SmallVector<Value, 4> inputs;
+    for (auto input : adaptor.getInputs()) {
+      inputs.push_back(input);
+    }
+
+    // Create the custom_call operation.
+    auto customCallOp = rewriter.create<stablehlo::CustomCallOp>(
+        op.getLoc(),
+        resultTypes,
+        inputs,
+        rewriter.getStringAttr(op.getKernelName()),
+        rewriter.getBoolAttr(false),  // has_side_effect
+        rewriter.getStringAttr(""),    // backend_config
+        /*api_version=*/nullptr,
+        /*called_computations=*/nullptr,
+        /*output_operand_aliases=*/nullptr);
+
+    rewriter.replaceOp(op, customCallOp.getResults());
+    return success();
+  }
+};
+
 } // anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -652,7 +944,14 @@ void jules::populateJulesToStableHLOPatterns(RewritePatternSet &patterns,
     CmpOpLowering,
     ConstantOpLowering,
     RandomOpLowering,
-    SliceOpLowering
+    SliceOpLowering,
+    LogOpLowering,
+    PadOpLowering,
+    BroadcastInDimOpLowering,
+    ReduceOpLowering,
+    WhileOpLowering,
+    ParallelOpLowering,
+    ExternKernelOpLowering
   >(typeConverter, patterns.getContext());
 }
 
@@ -668,6 +967,8 @@ struct JulesToStableHLOLoweringPass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<stablehlo::StableHLODialect>();
     registry.insert<func::FuncDialect>();
+    registry.insert<arith::ArithDialect>();
+    registry.insert<scf::SCFDialect>();
   }
 
   void runOnOperation() override {

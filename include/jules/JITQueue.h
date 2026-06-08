@@ -41,17 +41,135 @@
 #include "jules/Diagnostics.h"
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace jules {
+
+// ── Kernel Cache ─────────────────────────────────────────────────────────────
+
+/// Configuration for the kernel cache.
+struct KernelCacheConfig {
+  /// Root directory for cached executables.
+  /// Defaults to ~/.jules/cache/
+  std::string cacheDir;
+
+  /// Maximum cache size in bytes (0 = unlimited).
+  uint64_t maxCacheSizeBytes = 0;
+
+  /// Whether the cache is enabled.
+  bool enabled = true;
+
+  /// Whether to verify cache integrity on load.
+  bool verifyOnLoad = true;
+};
+
+/// A thread-safe disk-backed cache for compiled XLA executables.
+///
+/// The cache persists compiled kernels to disk so that subsequent runs
+/// of the same program (with the same shapes) can skip compilation
+/// entirely. This is especially valuable for:
+///
+///   - Development iteration (re-running the same model)
+///   - Production startup latency (first run populates cache,
+///     subsequent runs are instant)
+///   - Distributed training (workers share a cache via NFS)
+///
+/// Cache key: SHA256(mlir_text + shape_signature)
+/// Cache value: serialized XLA executable blob
+///
+/// Thread safety: uses a read-write lock. Multiple readers can
+/// access the cache concurrently; writers get exclusive access.
+class KernelCache {
+public:
+  explicit KernelCache(DiagnosticsEngine &diag,
+                       KernelCacheConfig config = {});
+  ~KernelCache();
+
+  // Non-copyable.
+  KernelCache(const KernelCache &) = delete;
+  KernelCache &operator=(const KernelCache &) = delete;
+
+  /// Look up a cached executable.
+  /// Returns the serialized module if found, or empty string otherwise.
+  /// Thread-safe: uses shared lock for reads.
+  std::string lookup(const std::string &functionName,
+                     const std::string &mlirText,
+                     const ShapeSignature &shapes);
+
+  /// Store a compiled executable in the cache.
+  /// Thread-safe: uses exclusive lock for writes.
+  void store(const std::string &functionName,
+             const std::string &mlirText,
+             const ShapeSignature &shapes,
+             const std::string &serializedModule);
+
+  /// Check if an entry exists in the cache.
+  bool contains(const std::string &functionName,
+                const std::string &mlirText,
+                const ShapeSignature &shapes);
+
+  /// Invalidate a specific cache entry.
+  bool invalidate(const std::string &functionName,
+                  const std::string &mlirText,
+                  const ShapeSignature &shapes);
+
+  /// Clear the entire cache (memory + disk).
+  void clear();
+
+  /// Get the number of entries in the in-memory cache.
+  size_t size() const;
+
+  /// Get the total size of cached entries in bytes.
+  uint64_t totalBytes() const;
+
+  /// Get cache statistics.
+  uint64_t hitCount() const { return hitCount_.load(); }
+  uint64_t missCount() const { return missCount_.load(); }
+  uint64_t storeCount() const { return storeCount_.load(); }
+
+  /// Compute the cache key for a given function + MLIR + shapes.
+  static std::string computeCacheKey(const std::string &functionName,
+                                     const std::string &mlirText,
+                                     const ShapeSignature &shapes);
+
+private:
+  /// Ensure the cache directory exists.
+  void ensureCacheDirectory();
+
+  /// Get the file path for a cache key.
+  std::filesystem::path getCacheFilePath(const std::string &cacheKey) const;
+
+  /// Compute SHA256 hash of the input string.
+  static std::string sha256(const std::string &input);
+
+  DiagnosticsEngine                    &diag_;
+  KernelCacheConfig                     config_;
+
+  /// In-memory cache: cache_key -> serialized module.
+  std::unordered_map<std::string, std::string> memoryCache_;
+
+  /// Track the size of each cached entry.
+  std::unordered_map<std::string, uint64_t> entrySizes_;
+
+  /// Read-write lock for thread safety.
+  mutable std::shared_mutex             rwLock_;
+
+  /// Statistics.
+  std::atomic<uint64_t>                 hitCount_{0};
+  std::atomic<uint64_t>                 missCount_{0};
+  std::atomic<uint64_t>                 storeCount_{0};
+};
 
 // ── Compilation Job ─────────────────────────────────────────────────────────
 
@@ -189,6 +307,10 @@ public:
   /// Is the queue running?
   bool isRunning() const { return running_.load(); }
 
+  /// Get the kernel cache (for external inspection/testing).
+  KernelCache &kernelCache() { return kernelCache_; }
+  const KernelCache &kernelCache() const { return kernelCache_; }
+
 private:
   /// Worker thread function.
   void workerLoop();
@@ -223,6 +345,9 @@ private:
   std::atomic<uint64_t>                      failedCount_{0};
   std::atomic<uint64_t>                      totalCompileTimeMs_{0};
   std::atomic<size_t>                        activeCompiles_{0};
+
+  /// Kernel cache for avoiding redundant compilation.
+  KernelCache                                kernelCache_;
 };
 
 } // namespace jules

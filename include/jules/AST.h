@@ -87,7 +87,17 @@ public:
 /// Scalar types: f32, f64, i32, i64, bool, unit.
 class ScalarType : public TypeNode {
 public:
-  enum ScalarKind { SK_F32, SK_F64, SK_I32, SK_I64, SK_Bool, SK_Unit };
+  enum ScalarKind {
+    SK_F32,
+    SK_F64,
+    SK_I32,
+    SK_I64,
+    SK_Bool,
+    SK_Unit,
+    SK_BF16,
+    SK_FP8E4M3,
+    SK_FP8E5M2
+  };
 
   explicit ScalarType(ScalarKind kind, SourceLocation loc = {})
       : kind_(kind), loc_(loc) {}

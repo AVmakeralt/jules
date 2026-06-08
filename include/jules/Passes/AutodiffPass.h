@@ -18,6 +18,12 @@
 // The pass operates entirely at the MLIR level, enabling optimization of the
 // forward+backward graph before lowering to StableHLO (e.g. kernel fusion).
 //
+// Supported adjoint rules:
+//   add, sub, mul, div, neg, matmul, relu, sigmoid, tanh, pow, mean, sum,
+//   cast, transpose, concat, select, reshape, slice (via pad), log,
+//   broadcast_in_dim (via reduce), pad (via slice), reduce (via broadcast),
+//   while (tape-based reverse loop)
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef JULES_PASSES_AUTODIFFPASS_H

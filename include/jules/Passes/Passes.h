@@ -26,6 +26,10 @@
 //     - SymbolDCEPass: Symbol Dead Code Elimination
 //     - SIMDLayoutPass: SIMD vectorization layout optimization
 //     - PolyhedralOptPass: Affine/polyhedral loop optimization
+//     - ProducerConsumerFusionPass: Kernel fusion for elementwise chains,
+//       matmul+activation, and elementwise+reduction
+//     - MemoryPlanningPass: Buffer lifetime analysis and in-place reuse
+//     - MixedPrecisionPass: Mixed precision (bf16/fp8) optimization
 //
 //===----------------------------------------------------------------------===//
 
@@ -66,6 +70,9 @@ std::unique_ptr<mlir::Pass> createAlgebraicSimplificationPass();
 /// Create the autodiff pruning pass.
 std::unique_ptr<mlir::Pass> createAutodiffPruningPass();
 
+/// Create the fused autodiff pass (autodiff + pruning + collapsing in one).
+std::unique_ptr<mlir::Pass> createFusedAutodiffPass();
+
 /// Create the PGO-informed optimization pass.
 std::unique_ptr<mlir::Pass> createPGOPass(const Profiler &profiler);
 
@@ -93,6 +100,47 @@ std::unique_ptr<mlir::Pass> createPolyhedralOptPass();
 
 /// Create the polyhedral optimization pass with a specific cache size.
 std::unique_ptr<mlir::Pass> createPolyhedralOptPass(uint64_t cacheSizeBytes);
+
+/// Create the Producer-Consumer Fusion pass.
+/// Fuses elementwise chains, matmul+activation, and elementwise+reduction
+/// into fusion clusters for reduced kernel launch overhead.
+std::unique_ptr<mlir::Pass> createProducerConsumerFusionPass();
+
+/// Create the Memory Planning pass.
+/// Analyzes buffer lifetimes and annotates operations with in-place reuse
+/// hints, alignment, and alias information.
+std::unique_ptr<mlir::Pass> createMemoryPlanningPass();
+
+/// Create the Memory Planning pass with a specific memory budget limit.
+std::unique_ptr<mlir::Pass> createMemoryPlanningPass(uint64_t memoryBudgetBytes);
+
+/// Create the mixed precision optimization pass with default settings
+/// (target precision = bf16, min op count = 5).
+std::unique_ptr<mlir::Pass> createMixedPrecisionPass();
+
+/// Create the mixed precision optimization pass with a specific target
+/// precision ("bf16" or "fp8").
+std::unique_ptr<mlir::Pass> createMixedPrecisionPass(std::string targetPrecision);
+
+// ── Shape Polymorphism ──────────────────────────────────────────────────────
+
+/// Create the Shape Polymorphism pass.
+/// Carries symbolic dimension constraints through the pipeline instead of
+/// lowering everything to ShapedType::kDynamic, enabling XLA to specialize.
+std::unique_ptr<mlir::Pass> createShapePolymorphismPass();
+
+// ── Quantization ────────────────────────────────────────────────────────────
+
+/// Create the Quantization pass with default options.
+/// Inserts fake-quantization nodes for inference optimization.
+std::unique_ptr<mlir::Pass> createQuantizePass();
+
+/// Create the Quantization pass with explicit options.
+std::unique_ptr<mlir::Pass> createQuantizePass(
+    bool quantizeWeights,
+    bool quantizeActivations,
+    unsigned numBits,
+    bool perChannel);
 
 // ── Registration ────────────────────────────────────────────────────────────
 

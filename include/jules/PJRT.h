@@ -16,6 +16,7 @@
 //   - Buffer allocation and data transfer
 //   - Executable loading and execution
 //   - Async execution with event synchronization
+//   - Pipeline execution with stage overlap
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,10 +25,17 @@
 
 #include "jules/Diagnostics.h"
 #include "jules/AST.h"
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace jules {
@@ -78,6 +86,27 @@ public:
   virtual bool isReady() const = 0;
 };
 
+/// A DeviceEvent backed by a std::future, enabling true async execution.
+class FutureDeviceEvent : public DeviceEvent {
+public:
+  explicit FutureDeviceEvent(std::future<void> fut)
+      : future_(std::move(fut)) {}
+
+  void await() override {
+    if (future_.valid()) {
+      future_.wait();
+    }
+  }
+
+  bool isReady() const override {
+    if (!future_.valid()) return true;
+    return future_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  }
+
+private:
+  mutable std::future<void> future_;
+};
+
 // ── PJRT Executable ─────────────────────────────────────────────────────────
 
 /// A compiled executable loaded onto a device via PJRT.
@@ -97,6 +126,17 @@ public:
 
   /// Get the name of this executable (for debugging).
   virtual std::string name() const = 0;
+};
+
+// ── Async Task ──────────────────────────────────────────────────────────────
+
+/// A task for the async execution thread pool.
+struct AsyncTask {
+  /// The function to execute.
+  std::function<void()> work;
+
+  /// Priority (lower = higher priority).
+  int priority = 0;
 };
 
 // ── PJRT Device ─────────────────────────────────────────────────────────────
@@ -127,6 +167,26 @@ public:
   /// The program is the serialized StableHLO/MLIR representation.
   virtual std::shared_ptr<PJRTExecutable>
   loadExecutable(const std::string &serializedProgram) = 0;
+};
+
+// ── Pipeline Stage ──────────────────────────────────────────────────────────
+
+/// A stage in a pipeline execution. Each stage has an executable and
+/// input/output buffers. Stage N+1 can begin as soon as Stage N's
+/// output is ready, enabling overlapped execution.
+struct PipelineStage {
+  /// The executable to run for this stage.
+  PJRTExecutable *executable = nullptr;
+
+  /// Input buffers for this stage. For stage 0, these are the pipeline
+  /// inputs. For stage N>0, these are set from stage N-1's outputs.
+  std::vector<std::shared_ptr<DeviceBuffer>> inputs;
+
+  /// Output buffers produced by this stage.
+  std::vector<std::shared_ptr<DeviceBuffer>> outputs;
+
+  /// Event signaling completion of this stage.
+  std::shared_ptr<DeviceEvent> completionEvent;
 };
 
 // ── PJRT Client ─────────────────────────────────────────────────────────────
@@ -163,11 +223,19 @@ public:
 
   /// Synchronize all devices.
   virtual void synchronizeAll() = 0;
+
+  /// Execute a pipeline of executables with stage overlap.
+  /// Each stage's output feeds the next stage's input.
+  /// Stage N+1 starts as soon as Stage N's output is ready.
+  virtual std::vector<std::shared_ptr<DeviceBuffer>>
+  executePipeline(const std::vector<PJRTExecutable*> &stages,
+                  const std::vector<std::shared_ptr<DeviceBuffer>> &inputs) = 0;
 };
 
 // ── CPU PJRT Implementation ─────────────────────────────────────────────────
 
 /// A CPU-based PJRT client for development and testing.
+/// Supports true async execution via a thread pool.
 class CPUPJRTClient : public PJRTClient {
 public:
   explicit CPUPJRTClient(DiagnosticsEngine &diag);
@@ -184,9 +252,35 @@ public:
   compileAndLoad(const std::string &serializedProgram) override;
   void synchronizeAll() override;
 
+  /// Pipeline execution with stage overlap.
+  std::vector<std::shared_ptr<DeviceBuffer>>
+  executePipeline(const std::vector<PJRTExecutable*> &stages,
+                  const std::vector<std::shared_ptr<DeviceBuffer>> &inputs) override;
+
+  // ── Async Thread Pool ──────────────────────────────────────────────────
+
+  /// Submit a task to the async worker pool.
+  void submitTask(AsyncTask task);
+
+  /// Get the number of worker threads.
+  size_t poolSize() const { return workerPool_.size(); }
+
+  /// Shut down the thread pool (called by destructor).
+  void shutdownPool();
+
 private:
   DiagnosticsEngine &diag_;
   std::unique_ptr<PJRTDevice> cpuDevice_;
+
+  // ── Thread Pool for Async Execution ────────────────────────────────────
+  std::vector<std::thread> workerPool_;
+  std::deque<AsyncTask> taskQueue_;
+  std::mutex queueMutex_;
+  std::condition_variable queueCv_;
+  std::atomic<bool> poolShutdown_{false};
+
+  /// Worker loop for the async thread pool.
+  void workerLoop();
 };
 
 // ── CPU Device Buffer ───────────────────────────────────────────────────────

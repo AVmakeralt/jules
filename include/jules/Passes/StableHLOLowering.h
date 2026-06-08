@@ -31,9 +31,16 @@
 //   jules.concat    -> stablehlo.concatenate
 //   jules.slice     -> stablehlo.slice
 //   jules.select    -> stablehlo.select
-//   jules.cmp       -> stablehlo.compare
-//   jules.constant  -> stablehlo.constant
-//   jules.func      -> func.func
+//   jules.cmp             -> stablehlo.compare
+//   jules.constant        -> stablehlo.constant
+//   jules.log             -> stablehlo.log
+//   jules.pad             -> stablehlo.pad
+//   jules.broadcast_in_dim -> stablehlo.broadcast_in_dim
+//   jules.reduce          -> stablehlo.reduce
+//   jules.while           -> stablehlo.while
+//   jules.parallel        -> scf.parallel
+//   jules.extern_kernel   -> stablehlo.custom_call
+//   jules.func            -> func.func
 //   jules.call      -> func.call
 //
 //===----------------------------------------------------------------------===//

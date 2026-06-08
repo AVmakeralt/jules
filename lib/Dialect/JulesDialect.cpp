@@ -29,6 +29,10 @@ void jules::JulesDialect::initialize() {
 #include "jules/Dialect/JulesOps.cpp.inc"
       >();
 
+  // Register custom types for mixed precision support.
+  addTypes<BF16Type, FP8E4M3Type, FP8E5M2Type>();
+
+  // Also register any TableGen'd types.
   addTypes<
 #define GET_TYPEDEF_LIST
 #include "jules/Dialect/JulesOpsTypes.cpp.inc"
@@ -41,14 +45,31 @@ Type jules::JulesDialect::parseType(DialectAsmParser &parser) const {
   StringRef keyword;
   if (parser.parseKeyword(&keyword)) return Type();
 
-  // We use MLIR's built-in RankedTensorType for tensor types, so
-  // we only need to parse any custom types we define here.
+  // Parse custom Jules types for mixed precision.
+  if (keyword == "bf16") {
+    return BF16Type::get(getContext());
+  }
+  if (keyword == "fp8_e4m3") {
+    return FP8E4M3Type::get(getContext());
+  }
+  if (keyword == "fp8_e5m2") {
+    return FP8E5M2Type::get(getContext());
+  }
+
   parser.emitError(parser.getNameLoc(), "unknown Jules type: " + keyword);
   return Type();
 }
 
 void jules::JulesDialect::printType(Type type, DialectAsmPrinter &os) const {
-  llvm_unreachable("no custom Jules types to print");
+  if (type.isa<BF16Type>()) {
+    os << "bf16";
+  } else if (type.isa<FP8E4M3Type>()) {
+    os << "fp8_e4m3";
+  } else if (type.isa<FP8E5M2Type>()) {
+    os << "fp8_e5m2";
+  } else {
+    llvm_unreachable("unknown Jules type to print");
+  }
 }
 
 // ── Dialect registration hook ───────────────────────────────────────────────
