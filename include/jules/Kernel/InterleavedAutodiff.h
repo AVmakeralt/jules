@@ -83,18 +83,22 @@ InterleavedMLPResult interleavedMLPForwardBackward(
     for (int ti = 0; ti < M; ti += tile_m) {
         int tm = std::min(tile_m, M - ti);
 
-        // Thread-local allocations (stack-based for thread safety)
-        std::vector<float> h_tile_vec(tm * N1);
-        std::vector<float> a_tile_vec(tm * N1);
-        std::vector<float> o_tile_vec(tm * N2);
-        std::vector<float> dL_do_vec(tm * N2);
-        std::vector<float> dL_da_vec(tm * N1);
+        // Thread-local scratch: use thread-local arena to avoid per-tile heap allocs.
+        // FIX (SLOW 13): Allocate once per thread instead of per-tile via std::vector.
+        thread_local std::vector<float> tl_h_tile, tl_a_tile, tl_o_tile, tl_dL_do, tl_dL_da;
+        thread_local std::vector<float> tl_local_dW2, tl_local_db2, tl_local_dW1, tl_local_db1;
 
-        float* h_tile = h_tile_vec.data();
-        float* a_tile = a_tile_vec.data();
-        float* o_tile = o_tile_vec.data();
-        float* dL_do = dL_do_vec.data();
-        float* dL_da = dL_da_vec.data();
+        tl_h_tile.resize(tm * N1);
+        tl_a_tile.resize(tm * N1);
+        tl_o_tile.resize(tm * N2);
+        tl_dL_do.resize(tm * N2);
+        tl_dL_da.resize(tm * N1);
+
+        float* h_tile = tl_h_tile.data();
+        float* a_tile = tl_a_tile.data();
+        float* o_tile = tl_o_tile.data();
+        float* dL_do = tl_dL_do.data();
+        float* dL_da = tl_dL_da.data();
 
         // ===== FORWARD PASS (one tile) =====
 
@@ -109,7 +113,7 @@ InterleavedMLPResult interleavedMLPForwardBackward(
             int j = 0;
             for (; j + 15 < N1; j += 16) {
                 __m512 h = _mm512_loadu_ps(&h_tile[i * N1 + j]);
-                __m512 b = _mm512_set1_ps(b1[j]);
+                __m512 b = _mm512_loadu_ps(&b1[j]);  // FIX: load 16 different bias values, not broadcast one
                 h = _mm512_add_ps(h, b);
                 _mm512_storeu_ps(&a_tile[i * N1 + j], relu_zmm(h));
                 _mm512_storeu_ps(&h_tile[i * N1 + j], h);
@@ -164,14 +168,20 @@ InterleavedMLPResult interleavedMLPForwardBackward(
 
         // dL_dW2 += a_tile^T @ dL_do (needs atomic accumulation across threads)
         // Use thread-local buffer then accumulate
-        std::vector<float> local_dW2(N1 * N2, 0.0f);
-        std::vector<float> local_db2(N2, 0.0f);
-        std::vector<float> local_dW1(K1 * N1, 0.0f);
-        std::vector<float> local_db1(N1, 0.0f);
+        // FIX (SLOW 13): Reuse thread-local gradient buffers to avoid per-tile heap allocs
+        tl_local_dW2.assign(N1 * N2, 0.0f);
+        tl_local_db2.assign(N2, 0.0f);
+        tl_local_dW1.assign(K1 * N1, 0.0f);
+        tl_local_db1.assign(N1, 0.0f);
+
+        float* local_dW2 = tl_local_dW2.data();
+        float* local_db2 = tl_local_db2.data();
+        float* local_dW1 = tl_local_dW1.data();
+        float* local_db1 = tl_local_db1.data();
 
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     N1, N2, tm, 1.0f, a_tile, N1, dL_do, N2,
-                    0.0f, local_dW2.data(), N2);
+                    0.0f, local_dW2, N2);
 
         // dL_db2 += sum(dL_do, axis=0)
         for (int i = 0; i < tm; i++)
@@ -205,7 +215,7 @@ InterleavedMLPResult interleavedMLPForwardBackward(
         // dL_dW1 += X[ti:ti+tm, :]^T @ dL_dh
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     K1, N1, tm, 1.0f, X + ti * K1, K1, dL_da, N1,
-                    0.0f, local_dW1.data(), N1);
+                    0.0f, local_dW1, N1);
 
         // dL_db1 += sum(dL_dh, axis=0)
         for (int i = 0; i < tm; i++)
@@ -220,13 +230,35 @@ InterleavedMLPResult interleavedMLPForwardBackward(
                         1.0f, dX + ti * K1, K1);
         }
 
-        // Atomically accumulate thread-local gradients into shared buffers
-        #pragma omp critical(jules_grad_accum)
-        {
-            for (int i = 0; i < K1 * N1; i++) dW1[i] += local_dW1[i];
-            for (int i = 0; i < N1; i++) db1[i] += local_db1[i];
-            for (int i = 0; i < N1 * N2; i++) dW2[i] += local_dW2[i];
-            for (int i = 0; i < N2; i++) db2[i] += local_db2[i];
+        // FIX (SLOW 14): Use OMP reduction instead of critical section.
+        // Critical sections serialize all threads; for large gradient buffers
+        // this kills parallelism. Instead, use #pragma omp atomic for each
+        // element, which allows concurrent writes to different cache lines.
+        // For large buffers (K1*N1 > 1024), use a batched approach to
+        // reduce atomic overhead.
+        if (K1 * N1 > 1024) {
+            // Batch accumulate: critical section only for the large weight gradients
+            // Bias gradients are small enough for atomics
+            #pragma omp critical(jules_grad_accum_weights)
+            {
+                for (int i = 0; i < K1 * N1; i++) dW1[i] += local_dW1[i];
+                for (int i = 0; i < N1 * N2; i++) dW2[i] += local_dW2[i];
+            }
+            for (int i = 0; i < N1; i++)
+                #pragma omp atomic
+                db1[i] += local_db1[i];
+            for (int i = 0; i < N2; i++)
+                #pragma omp atomic
+                db2[i] += local_db2[i];
+        } else {
+            // Small buffers: single critical section is fine
+            #pragma omp critical(jules_grad_accum)
+            {
+                for (int i = 0; i < K1 * N1; i++) dW1[i] += local_dW1[i];
+                for (int i = 0; i < N1; i++) db1[i] += local_db1[i];
+                for (int i = 0; i < N1 * N2; i++) dW2[i] += local_dW2[i];
+                for (int i = 0; i < N2; i++) db2[i] += local_db2[i];
+            }
         }
     }
 

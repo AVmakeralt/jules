@@ -242,6 +242,38 @@ private:
   /// Whether we're in inference mode (replace fake_quant with int8 ops).
   bool inferenceMode_ = false;
 
+  // FIX (BUG 4+5): Allow programmatic configuration of all quantization
+  // parameters, not just cl::opt defaults.
+  bool quantizeWeightsOverride_ = false;
+  bool quantizeWeightsValue_ = true;
+  bool quantizeActivationsOverride_ = false;
+  bool quantizeActivationsValue_ = false;
+  unsigned numBitsOverride_ = 0;  // 0 means use cl::opt default
+  unsigned numBitsValue_ = 8;
+  bool perChannelOverride_ = false;
+  bool perChannelValue_ = true;
+  bool inferenceModeOverride_ = false;
+
+  // Accessor methods for programmatic configuration
+  void setQuantizeWeights(bool val) { quantizeWeightsOverride_ = true; quantizeWeightsValue_ = val; }
+  void setQuantizeActivations(bool val) { quantizeActivationsOverride_ = true; quantizeActivationsValue_ = val; }
+  void setNumBits(unsigned val) { numBitsOverride_ = 1; numBitsValue_ = val; }
+  void setPerChannel(bool val) { perChannelOverride_ = true; perChannelValue_ = val; }
+  void setInferenceMode(bool val) { inferenceModeOverride_ = true; inferenceMode_ = val; }
+
+  bool shouldQuantizeWeights() const {
+    return quantizeWeightsOverride_ ? quantizeWeightsValue_ : (bool)quantizeWeights;
+  }
+  bool shouldQuantizeActivations() const {
+    return quantizeActivationsOverride_ ? quantizeActivationsValue_ : (bool)quantizeActivations;
+  }
+  unsigned getNumBits() const {
+    return numBitsOverride_ ? numBitsValue_ : (unsigned)numBits;
+  }
+  bool shouldPerChannel() const {
+    return perChannelOverride_ ? perChannelValue_ : (bool)perChannel;
+  }
+
   /// Process a single function: insert fake_quant ops.
   void quantizeFunction(func::FuncOp funcOp) {
     // Collect all MatMulOps first to avoid modifying the IR while iterating.
@@ -254,13 +286,13 @@ private:
 
     for (auto matmulOp : matmulOps) {
       // ── Quantize weight input to MatMul ────────────────────────────────
-      if (quantizeWeights) {
+      if (shouldQuantizeWeights()) {
         quantizeMatmulWeight(matmulOp, builder);
       }
     }
 
     // ── Quantize activations after MatMul + ReLU ─────────────────────────
-    if (quantizeActivations) {
+    if (shouldQuantizeActivations()) {
       SmallVector<ReluOp, 16> reluOps;
       funcOp.walk([&](ReluOp op) {
         // Only quantize ReLU outputs that follow a MatMul.
@@ -273,7 +305,7 @@ private:
         builder.setInsertionPointAfter(reluOp);
         auto fakeQuant = createFakeQuantOp(
             builder, reluOp.getLoc(), reluOp.getResult(),
-            /*scale=*/1.0, /*zero_point=*/0, numBits);
+            /*scale=*/1.0, /*zero_point=*/0, getNumBits());
         reluOp.getResult().replaceAllUsesWith(fakeQuant->getResult(0));
         fakeQuant->replaceUsesOfWith(fakeQuant->getResult(0), reluOp.getResult());
       }
@@ -320,7 +352,7 @@ private:
       builder.setInsertionPoint(matmulOp);
       auto fakeQuant = createFakeQuantOp(
           builder, matmulOp.getLoc(), weight,
-          /*scale=*/1.0, /*zero_point=*/0, numBits);
+          /*scale=*/1.0, /*zero_point=*/0, getNumBits());
       matmulOp.setOperand(weight == lhs ? 0 : 1,
                           fakeQuant->getResult(0));
       return;
@@ -331,26 +363,26 @@ private:
 
     builder.setInsertionPoint(matmulOp);
 
-    if (perChannel && weightType.getRank() == 2) {
+    if (shouldPerChannel() && weightType.getRank() == 2) {
       // Per-channel quantization for 2D weight matrices.
       SmallVector<double, 64> scales;
       SmallVector<int64_t, 64> zeroPoints;
-      computePerChannelQuantParams(weightTensor, weightType, numBits,
+      computePerChannelQuantParams(weightTensor, weightType, getNumBits(),
                                     scales, zeroPoints);
 
       auto fakeQuant = createPerChannelFakeQuantOp(
-          builder, matmulOp.getLoc(), weight, scales, zeroPoints, numBits);
+          builder, matmulOp.getLoc(), weight, scales, zeroPoints, getNumBits());
       matmulOp.setOperand(weight == lhs ? 0 : 1,
                           fakeQuant->getResult(0));
     } else {
       // Per-tensor symmetric quantization.
       double scale;
       int64_t zeroPoint;
-      computeSymmetricQuantParams(weightTensor, numBits, scale, zeroPoint);
+      computeSymmetricQuantParams(weightTensor, getNumBits(), scale, zeroPoint);
 
       auto fakeQuant = createFakeQuantOp(
           builder, matmulOp.getLoc(), weight,
-          scale, zeroPoint, numBits);
+          scale, zeroPoint, getNumBits());
       matmulOp.setOperand(weight == lhs ? 0 : 1,
                           fakeQuant->getResult(0));
     }
@@ -541,12 +573,12 @@ std::unique_ptr<Pass> jules::createQuantizePass(
     bool quantizeWeights, bool quantizeActivations,
     unsigned numBits, bool perChannel) {
   auto pass = std::make_unique<QuantizePass>();
-  // Note: CommandLine options are set via the cl::opt mechanism.
-  // For programmatic use, we would need a separate constructor.
-  // This factory function serves as the public API entry point.
-  (void)quantizeWeights;
-  (void)quantizeActivations;
-  (void)numBits;
-  (void)perChannel;
+  // FIX (BUG 4): Actually apply the parameters instead of ignoring them.
+  pass->setQuantizeWeights(quantizeWeights);
+  pass->setQuantizeActivations(quantizeActivations);
+  pass->setNumBits(numBits);
+  pass->setPerChannel(perChannel);
+  // FIX (BUG 5): Enable inference mode when quantize is configured for int8
+  pass->setInferenceMode(numBits == 8);
   return pass;
 }

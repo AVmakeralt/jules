@@ -61,8 +61,10 @@ void standardAttention(float* output,
         for (int h = 0; h < heads; h++) {
             // Each thread needs its own scratch space
             // For simplicity, allocate on stack if small enough
-            std::vector<float> attn_weights_vec(seq * seq);
-            float* attn_weights = attn_weights_vec.data();
+            // Thread-local attention weights buffer
+            thread_local std::vector<float> tl_attn_weights;
+            tl_attn_weights.assign(seq * seq, 0.0f);
+            float* attn_weights = tl_attn_weights.data();
 
             const float* q = Q + (b * heads + h) * seq * head_dim;
             const float* k = K + (b * heads + h) * seq * head_dim;
@@ -160,21 +162,24 @@ void flashAttention(float* output,
             for (int tq = 0; tq < seq; tq += tile_q) {
                 int tq_curr = std::min(tile_q, seq - tq);
 
-                // Thread-local allocations on stack
-                std::vector<float> running_max_vec(tq_curr, -FLT_MAX);
-                std::vector<float> running_sum_vec(tq_curr, 0.0f);
-                std::vector<float> accum_out_vec(tq_curr * head_dim, 0.0f);
+                // FIX (SLOW 13): Use thread-local vectors to avoid per-tile
+                // heap allocations inside the double-nested loop.
+                thread_local std::vector<float> tl_running_max, tl_running_sum, tl_accum_out;
+                tl_running_max.assign(tq_curr, -FLT_MAX);
+                tl_running_sum.assign(tq_curr, 0.0f);
+                tl_accum_out.assign(tq_curr * head_dim, 0.0f);
 
-                float* running_max = running_max_vec.data();
-                float* running_sum = running_sum_vec.data();
-                float* accum_out = accum_out_vec.data();
+                float* running_max = tl_running_max.data();
+                float* running_sum = tl_running_sum.data();
+                float* accum_out = tl_accum_out.data();
 
                 for (int tk = 0; tk < seq; tk += tile_k) {
                     int tk_curr = std::min(tile_k, seq - tk);
 
-                    // Allocate scores on stack for thread safety
-                    std::vector<float> scores_vec(tq_curr * tk_curr);
-                    float* scores = scores_vec.data();
+                    // FIX (SLOW 13): Thread-local scores buffer
+                    thread_local std::vector<float> tl_scores;
+                    tl_scores.resize(tq_curr * tk_curr);
+                    float* scores = tl_scores.data();
 
                     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                                 tq_curr, tk_curr, head_dim, scale,

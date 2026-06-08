@@ -376,6 +376,28 @@ struct MixedPrecisionPass
 
       if (!lhsNeedsDowncast && !rhsNeedsDowncast) continue;
 
+      // FIX (SLOW 18): Skip mixed precision for small matmuls where the
+      // CastOp overhead (extra tensor allocation + memory bandwidth) exceeds
+      // the compute savings from lower precision. Heuristic: skip if the
+      // matmul is < 64K FLOPs (the cast ops cost ~2 tensor roundtrips which
+      // dominates for small matrices).
+      {
+        auto lhsTensor = lhsType.dyn_cast<RankedTensorType>();
+        auto rhsTensor = rhsType.dyn_cast<RankedTensorType>();
+        if (lhsTensor && rhsTensor) {
+          int64_t M = lhsTensor.getDimSize(lhsTensor.getRank() - 2);
+          int64_t K = lhsTensor.getDimSize(lhsTensor.getRank() - 1);
+          int64_t N = rhsTensor.getDimSize(rhsTensor.getRank() - 1);
+          // Handle dynamic dims: assume they're large enough
+          if (M != ShapedType::kDynamic &&
+              K != ShapedType::kDynamic &&
+              N != ShapedType::kDynamic) {
+            int64_t flops = 2 * M * K * N;
+            if (flops < 65536) continue;  // Skip small matmuls
+          }
+        }
+      }
+
       // Record the original result type for the final upcast.
       Type originalResultType = matmulOp.getResult().getType();
 

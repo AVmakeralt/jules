@@ -223,7 +223,10 @@ struct MatMulOpLowering : public OpConversionPattern<MatMulOp> {
       auto accumPrecAttr = stablehlo::PrecisionAttr::get(rewriter.getContext(),
                                                           parsePrecision(accumPrec));
 
-      precisionConfig = rewriter.getArrayAttr({lhsPrec, rhsPrec, accumPrecAttr});
+      // FIX: StableHLO dot_general expects exactly 2 precision config elements
+      // (one per operand). Accumulation precision is not part of precision_config;
+      // it's conveyed via the output_type or a custom_call wrapper.
+      precisionConfig = rewriter.getArrayAttr({lhsPrec, rhsPrec});
     }
 
     rewriter.replaceOpWithNewOp<stablehlo::DotGeneralOp>(
@@ -249,8 +252,12 @@ struct ReluOpLowering : public OpConversionPattern<ReluOp> {
     }
 
     // Create a zero constant with the same shape.
+    // FIX: Use the input element type's float semantics instead of hardcoding f32.
+    // Hardcoding IEEEsingle crashes the StableHLO verifier for bf16/f64 inputs.
+    auto floatSemantics = inputType.getElementType()
+        .cast<FloatType>().getFloatSemantics();
     auto zeroAttr = DenseFPElementsAttr::get(
-        inputType, ArrayRef<APFloat>(APFloat::getZero(APFloat::IEEEsingle())));
+        inputType, ArrayRef<APFloat>(APFloat::getZero(floatSemantics)));
     auto zero = rewriter.create<stablehlo::ConstantOp>(op.getLoc(), zeroAttr);
 
     rewriter.replaceOpWithNewOp<stablehlo::MaxOp>(
@@ -310,9 +317,12 @@ struct MeanOpLowering : public OpConversionPattern<MeanOp> {
     }
 
     // Create the reduction: add all elements together.
+    // FIX: Use the input element type's float semantics instead of hardcoding f32.
+    auto floatSemantics = inputType.getElementType()
+        .dyn_cast<FloatType>().getFloatSemantics();
     auto zeroAttr = DenseFPElementsAttr::get(
         RankedTensorType::get({}, inputType.getElementType()),
-        ArrayRef<APFloat>(APFloat::getZero(APFloat::IEEEsingle())));
+        ArrayRef<APFloat>(APFloat::getZero(floatSemantics)));
     auto zero = rewriter.create<stablehlo::ConstantOp>(op.getLoc(), zeroAttr);
 
     auto reduceOp = rewriter.create<stablehlo::ReduceOp>(
@@ -365,9 +375,12 @@ struct SumOpLowering : public OpConversionPattern<SumOp> {
       reduceDims.push_back(i);
     }
 
+    // FIX: Use the input element type's float semantics instead of hardcoding f32.
+    auto floatSemantics = inputType.getElementType()
+        .dyn_cast<FloatType>().getFloatSemantics();
     auto zeroAttr = DenseFPElementsAttr::get(
         RankedTensorType::get({}, inputType.getElementType()),
-        ArrayRef<APFloat>(APFloat::getZero(APFloat::IEEEsingle())));
+        ArrayRef<APFloat>(APFloat::getZero(floatSemantics)));
     auto zero = rewriter.create<stablehlo::ConstantOp>(op.getLoc(), zeroAttr);
 
     auto reduceOp = rewriter.create<stablehlo::ReduceOp>(
@@ -463,10 +476,21 @@ struct TransposeOpLowering : public OpConversionPattern<TransposeOp> {
       return rewriter.notifyMatchFailure(op, "requires ranked tensor input");
     }
 
-    // Transpose permutation: reverse the dimensions.
+    // Transpose permutation: use the op's permutation attribute if available,
+    // otherwise default to reversing dimensions (2D transpose = matrix transpose).
     SmallVector<int64_t, 4> permutation;
-    for (int64_t i = inputType.getRank() - 1; i >= 0; --i) {
-      permutation.push_back(i);
+    if (auto permAttr = op->getAttr("permutation")) {
+      if (auto arrayAttr = permAttr.dyn_cast<ArrayAttr>()) {
+        for (auto attr : arrayAttr) {
+          permutation.push_back(attr.cast<IntegerAttr>().getInt());
+        }
+      }
+    }
+    if (permutation.empty()) {
+      // Default: reverse dimensions (standard 2D transpose)
+      for (int64_t i = inputType.getRank() - 1; i >= 0; --i) {
+        permutation.push_back(i);
+      }
     }
 
     auto permAttr = DenseIntElementsAttr::get(
@@ -827,10 +851,10 @@ struct WhileOpLowering : public OpConversionPattern<WhileOp> {
     auto &dstBody = stableWhileOp.getBody();
     rewriter.cloneRegionBefore(srcBody, dstBody, dstBody.begin());
 
-    // Replace the while op results.
-    for (unsigned i = 0; i < op.getNumResults(); ++i) {
-      rewriter.replaceOp(op, stableWhileOp.getResults());
-    }
+    // Replace the while op results — single call, not N calls.
+    // Calling replaceOp N times on the same op corrupts the IR after
+    // the first call makes the op dead.
+    rewriter.replaceOp(op, stableWhileOp.getResults());
     return success();
   }
 };
@@ -880,9 +904,51 @@ struct ParallelOpLowering : public OpConversionPattern<ParallelOp> {
         op.getLoc(), lbs, ubs, steps);
 
     // Clone the body region into the scf.parallel.
+    // FIX: We must recursively lower any Jules dialect ops inside the
+    // parallel body to StableHLO/SCF ops, since the Jules→StableHLO
+    // conversion only runs once. Without this, the body would contain
+    // jules.add, jules.mul, etc. that XLA can't understand.
+    //
+    // We perform an in-place conversion walk after cloning.
     auto &srcBody = op.getBody();
     auto &dstBody = parallelOp.getBody();
     rewriter.cloneRegionBefore(srcBody, dstBody, dstBody.begin());
+
+    // Lower Jules dialect ops inside the parallel body to SCF/arith ops.
+    // For simple elementwise ops, we convert them inline.
+    dstBody.walk([&](Operation *bodyOp) {
+      if (bodyOp->getDialect()->getNamespace() == "jules" &&
+          !isa<ParallelOp>(bodyOp)) {
+        // Convert jules.add → arith.addf, jules.mul → arith.mulf, etc.
+        // This is a simplified inline conversion for the common cases.
+        if (auto addOp = dyn_cast<AddOp>(bodyOp)) {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPoint(addOp);
+          auto newOp = rewriter.create<mlir::arith::AddFOp>(
+              addOp.getLoc(), addOp.getLhs(), addOp.getRhs());
+          addOp.getResult().replaceAllUsesWith(newOp.getResult());
+        } else if (auto mulOp = dyn_cast<MulOp>(bodyOp)) {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPoint(mulOp);
+          auto newOp = rewriter.create<mlir::arith::MulFOp>(
+              mulOp.getLoc(), mulOp.getLhs(), mulOp.getRhs());
+          mulOp.getResult().replaceAllUsesWith(newOp.getResult());
+        } else if (auto subOp = dyn_cast<SubOp>(bodyOp)) {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPoint(subOp);
+          auto newOp = rewriter.create<mlir::arith::SubFOp>(
+              subOp.getLoc(), subOp.getLhs(), subOp.getRhs());
+          subOp.getResult().replaceAllUsesWith(newOp.getResult());
+        } else if (auto divOp = dyn_cast<DivOp>(bodyOp)) {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPoint(divOp);
+          auto newOp = rewriter.create<mlir::arith::DivFOp>(
+              divOp.getLoc(), divOp.getLhs(), divOp.getRhs());
+          divOp.getResult().replaceAllUsesWith(newOp.getResult());
+        }
+        // Other Jules ops in parallel bodies will need extension.
+      }
+    });
 
     // scf.parallel doesn't produce results in the same way.
     // For parallel ops that produce results, we would need to use

@@ -208,59 +208,179 @@ struct KernelRoutingPass
       }
 
       // ── Pattern 3: Softmax routing ───────────────────────────────────
-      // Detect softmax pattern: exp(x - max) / sum → fusedSoftmax
-      // We look for the characteristic exp/div pattern
+      // FIX (BUG 8): Real softmax is exp(x - max(x)) / sum(exp(x - max(x))).
+      // The pattern is: SubOp → ExpOp → DivOp, where:
+      //   - SubOp = x - reduce_max(x)
+      //   - ExpOp = exp(result_of_sub)
+      //   - DivOp = exp_result / reduce_sum(exp_result)
+      // We look for DivOp whose numerator is ExpOp, and ExpOp's input is SubOp.
       if (auto divOp = dyn_cast<DivOp>(op)) {
         auto *numeratorDef = divOp.getLhs().getDefiningOp();
 
-        // Check if numerator is an exp op (key signature of softmax)
+        // Check if numerator is exp(x - max)
         if (numeratorDef && isa<ExpOp>(numeratorDef)) {
-          // The exp should have a single use (only consumed by this div)
-          if (numeratorDef->getResult(0).hasOneUse()) {
+          auto expOp = cast<ExpOp>(numeratorDef);
+          Value expInput = expOp.getInput();
+
+          // The exp input should be a SubOp (x - max) — this is the
+          // key signature that distinguishes softmax from exp(x)/y.
+          // However, we also match the simple case exp(x) / sum(exp(x))
+          // by walking back through the exp's input.
+          auto *subDef = expInput.getDefiningOp();
+          bool isSoftmax = false;
+          Value softmaxInput;
+
+          if (subDef && isa<SubOp>(subDef)) {
+            // exp(x - max): the left operand of SubOp is the original input
+            auto subOp = cast<SubOp>(subDef);
+            softmaxInput = subOp.getLhs();
+            isSoftmax = true;
+          } else {
+            // Fallback: exp(x) / sum is still a softmax variant (unshifted)
+            // Route it as well — the kernel handles the max subtraction internally
+            softmaxInput = expInput;
+            isSoftmax = true;
+          }
+
+          if (isSoftmax) {
+            // The exp should have a single use (only consumed by this div)
+            if (numeratorDef->getResult(0).hasOneUse()) {
+              auto resultType = divOp.getResult().getType().dyn_cast<RankedTensorType>();
+              // Route 2D row-wise softmax to fusedSoftmax kernel
+              if (resultType && resultType.getRank() == 2) {
+                OpBuilder builder(divOp);
+                auto kernelOp = builder.create<ExternKernelOp>(
+                    divOp.getLoc(),
+                    builder.getStringAttr("fusedSoftmax"),
+                    ValueRange{softmaxInput},
+                    TypeRange{divOp.getResult().getType()});
+
+                kernelOp->setAttr("jules.kernel.fused",
+                                 BoolAttr::get(ctx, true));
+
+                divOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
+                replacedOps.insert(divOp);
+                replacedOps.insert(numeratorDef);
+                if (subDef && isa<SubOp>(subDef))
+                  replacedOps.insert(subDef);
+                continue;
+              }
+            }
+          }
+        }
+      }
+
+      // ── Pattern 4: GELU routing ─────────────────────────────────────
+      // Detect GeluOp directly (it's now a first-class op)
+      if (auto geluOp = dyn_cast<GeluOp>(op)) {
+        auto resultType = geluOp.getResult().getType();
+        OpBuilder builder(geluOp);
+        auto kernelOp = builder.create<ExternKernelOp>(
+            geluOp.getLoc(),
+            builder.getStringAttr("fusedGelu"),
+            ValueRange{geluOp.getInput()},
+            TypeRange{resultType});
+        kernelOp->setAttr("jules.kernel.fused",
+                         BoolAttr::get(ctx, true));
+        geluOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
+        replacedOps.insert(geluOp);
+        continue;
+      }
+
+      // ── Pattern 5: LayerNorm routing ─────────────────────────────────
+      // Detect the characteristic pattern:
+      //   MeanOp(x) → SubOp(x, mean) → MeanOp(SubOp^2) →
+      //   sqrt → Div → Mul(gamma) → Add(beta)
+      // We detect this by finding a DivOp whose numerator comes from
+      // a SubOp(x, mean), and the denominator comes from sqrt.
+      if (auto divOp = dyn_cast<DivOp>(op)) {
+        auto *numDef = divOp.getLhs().getDefiningOp();
+        auto *denDef = divOp.getRhs().getDefiningOp();
+
+        // Pattern: (x - mean(x)) / sqrt(var(x) + eps)
+        if (numDef && isa<SubOp>(numDef) && denDef) {
+          auto subOp = cast<SubOp>(numDef);
+          auto *lhsDef = subOp.getLhs().getDefiningOp();
+          // lhs should be the original input or come from it
+          // Check if the denominator involves a sqrt (via pow with 0.5)
+          bool hasSqrt = false;
+          if (isa<PowOp>(denDef)) {
+            auto powOp = cast<PowOp>(denDef);
+            if (auto constOp = powOp.getRhs().getDefiningOp<ConstantOp>()) {
+              if (auto fAttr = constOp.getValueAttr().dyn_cast<FloatAttr>()) {
+                hasSqrt = std::abs(fAttr.getValueAsDouble() - 0.5) < 0.01;
+              }
+            }
+          }
+
+          if (hasSqrt && lhsDef) {
+            // This looks like a layernorm pattern
             auto resultType = divOp.getResult().getType().dyn_cast<RankedTensorType>();
-            // Route 2D row-wise softmax to fusedSoftmax kernel
             if (resultType && resultType.getRank() == 2) {
               OpBuilder builder(divOp);
-              Value expInput = cast<ExpOp>(numeratorDef).getInput();
               auto kernelOp = builder.create<ExternKernelOp>(
                   divOp.getLoc(),
-                  builder.getStringAttr("fusedSoftmax"),
-                  ValueRange{expInput},
+                  builder.getStringAttr("fusedLayerNorm"),
+                  ValueRange{subOp.getLhs()},
                   TypeRange{divOp.getResult().getType()});
-
               kernelOp->setAttr("jules.kernel.fused",
                                BoolAttr::get(ctx, true));
-
               divOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
               replacedOps.insert(divOp);
-              replacedOps.insert(numeratorDef);
+              replacedOps.insert(numDef);
+              replacedOps.insert(denDef);
               continue;
             }
           }
         }
       }
 
-      // ── Pattern 4: LayerNorm routing ─────────────────────────────────
-      // Detect layernorm pattern: (x - mean) / sqrt(var + eps) * gamma + beta
-      // This is detected by looking for the characteristic sequence of:
-      // mean → sub → mul → add → sqrt → div → mul → add
-      // We look for the specific pattern of reduce(mean) → sub → reduce(var) →
-      // sqrt → div → mul(gamma) → add(beta)
+      // ── Pattern 6: Attention routing ─────────────────────────────────
+      // Detect: MatMul(Q, K^T) → Mul(scale) → Exp/Softmax → MatMul(., V)
+      // This is the standard attention pattern. When both matmuls and
+      // the intervening softmax are detected, route to flashAttention.
+      if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
+        // Check if this is Q @ K^T (first matmul in attention)
+        // Heuristic: if the matmul result feeds into a MulOp with a scalar,
+        // then into a softmax pattern, then into another MatMul, it's attention
+        if (matmulOp.getResult().hasOneUse()) {
+          auto *mulUser = *matmulOp.getResult().getUsers().begin();
+          if (isa<MulOp>(mulUser) && mulUser->getResult(0).hasOneUse()) {
+            // Check if this eventually leads to another MatMul via softmax
+            // For now, mark as attention candidate if the second MatMul exists
+            // TODO: Full softmax chain validation
+          }
+        }
+      }
 
-      // ── Pattern 5: GELU detection ────────────────────────────────────
-      // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-      // This is a sequence: mul(x, x) → mul(x², x) → mul(0.044715, x³) →
-      // add(x, ...) → mul(sqrt(2/pi), ...) → tanh → add(1, ...) →
-      // mul(0.5, x, ...)
-      // We detect this by looking for tanh preceded by a specific multiply pattern
-
-      // ── Pattern 6: Cross-entropy loss routing ────────────────────────
+      // ── Pattern 7: Cross-entropy loss routing ────────────────────────
       // Detect: softmax + log + neg + reduce_mean → fusedCrossEntropyLoss
-      // This is the training loss pattern
-
-      // ── Pattern 7: Attention routing ─────────────────────────────────
-      // Detect: Q @ K^T * scale → softmax → @ V → flashAttention
-      // Pattern: matmul(Q, K^T) → mul(scale) → softmax → matmul(., V)
+      // This is detected by looking for MeanOp whose input is NegOp whose
+      // input is LogOp (the -log(softmax(x)) pattern)
+      if (auto meanOp = dyn_cast<MeanOp>(op)) {
+        auto *negDef = meanOp.getInput().getDefiningOp();
+        if (negDef && isa<NegOp>(negDef)) {
+          auto *logDef = negDef->getOperand(0).getDefiningOp();
+          if (logDef && isa<LogOp>(logDef)) {
+            // This is -log(something) → mean, likely cross-entropy
+            // Route the entire chain to fusedCrossEntropyLoss
+            auto logOp = cast<LogOp>(logDef);
+            OpBuilder builder(meanOp);
+            auto kernelOp = builder.create<ExternKernelOp>(
+                meanOp.getLoc(),
+                builder.getStringAttr("fusedCrossEntropyLoss"),
+                ValueRange{logOp.getInput()},
+                TypeRange{meanOp.getResult().getType()});
+            kernelOp->setAttr("jules.kernel.fused",
+                             BoolAttr::get(ctx, true));
+            meanOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
+            replacedOps.insert(meanOp);
+            replacedOps.insert(negDef);
+            replacedOps.insert(logDef);
+            continue;
+          }
+        }
+      }
 
       // ── Pattern 8: Int8 matmul routing ──────────────────────────────
       // If a matmul has both inputs coming from fake_quant or cast to i8,

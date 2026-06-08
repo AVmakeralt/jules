@@ -172,12 +172,18 @@ struct ShapeConstraint {
   }
 
   /// Get all unique equality classes (representative → members).
+   /// FIX (BUG 10): Must call findRoot() on each key to apply path
+   /// compression. Without this, a chain A→B→C produces {B:[A], C:[B]}
+  /// instead of {C:[A,B]}.
   llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
   getEqualityClasses() const {
     llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
         classes;
     for (auto &kv : equalityClass) {
-      classes[kv.second].push_back(kv.first);
+      // Call findRoot on the VALUE to get the true representative,
+      // then group all members under that root.
+      StringAttr root = findRoot(kv.first);
+      classes[root].push_back(kv.first);
     }
     return classes;
   }

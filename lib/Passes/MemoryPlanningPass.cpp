@@ -265,18 +265,21 @@ struct MemoryPlanningPass
       }
 
       // Special handling for AddOp: if one operand has no other uses
-      // beyond this op, allow in-place even if the operand type is
-      // broadcast-compatible (not necessarily identical).
+      // beyond this op AND the types are exactly compatible, allow in-place.
+      // FIX (BUG 11): Must verify type compatibility even for AddOp.
+      // Without this check, [M,N] + [1,N] broadcast add would alias the
+      // [1,N] operand buffer, causing a buffer overflow when writing [M,N].
       if (isa<AddOp>(op) && !inPlaceOps.count(op) &&
           op->getNumOperands() == 2) {
         Value lhs = op->getOperand(0);
         Value rhs = op->getOperand(1);
 
-        // Check if one operand has exactly one use (this op).
-        if (lhs.hasOneUse()) {
+        // Check if one operand has exactly one use (this op) AND
+        // the type is compatible (same shape and element type).
+        if (lhs.hasOneUse() && isTypeCompatible(lhs.getType(), result.getType())) {
           inPlaceAlias[op] = 0;
           inPlaceOps.insert(op);
-        } else if (rhs.hasOneUse()) {
+        } else if (rhs.hasOneUse() && isTypeCompatible(rhs.getType(), result.getType())) {
           inPlaceAlias[op] = 1;
           inPlaceOps.insert(op);
         }
