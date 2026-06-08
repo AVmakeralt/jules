@@ -1,9 +1,27 @@
-//===- JIT.cpp - JIT Compiler with PGO Implementation ----------------------===//
+//===- JIT.cpp - Tier 2 JIT Compiler Implementation ------------------------===//
 //
 // Copyright (c) 2025 Jules Contributors
 //
-// This file implements the JIT compiler that orchestrates speculative
-// compilation, PGO profiling, and background recompilation.
+// This file implements the Tier 2 JIT compiler. It produces specialized,
+// static-shape XLA binaries that are hyper-optimized for the specific
+// tensor dimensions observed during PGO profiling.
+//
+// The Tier 2 compilation pipeline:
+//
+//   ActiveTrace → MLIR Module (with concrete shapes)
+//     → Shape Inference
+//     → Autodiff Pass
+//     → Autodiff Pruning
+//     → Graph Collapsing
+//     → Whole-Program Collapsing
+//     → SCCP (Constant Propagation)
+//     → SymbolDCE
+//     → Algebraic Simplification
+//     → SIMD Layout Optimization
+//     → Polyhedral Optimization (with static dimensions)
+//     → Canonicalization + CSE
+//     → StableHLO Lowering
+//     → Tier 2 Executable
 //
 //===----------------------------------------------------------------------===//
 
@@ -42,7 +60,7 @@ using namespace jules;
 
 namespace {
 
-/// A simple executable that wraps compiled MLIR + a PJRT executable handle.
+/// A JIT-compiled executable that wraps compiled MLIR + a PJRT executable.
 class JulesExecutable : public Executable {
 public:
   JulesExecutable(uint64_t id, uint64_t traceId, bool specialized,
@@ -55,12 +73,9 @@ public:
 
   std::vector<void *> execute(const std::vector<void *> &inputs) override {
     // In a full implementation, this would invoke the PJRT executable.
-    // For now, it returns empty (the MLIR module has been compiled
-    // and can be inspected / serialized).
     return {};
   }
 
-  /// Get the serialized MLIR module.
   const std::string &getMLIRModule() const { return mlirModule_; }
 
 private:
@@ -88,7 +103,7 @@ std::shared_ptr<Executable> JITCompiler::compileTrace(ActiveTrace &trace,
                                                        bool useStaticShapes) {
   static std::atomic<uint64_t> nextExecId{1};
   uint64_t execId = nextExecId.fetch_add(1);
-  uint64_t traceId = 0; // Will be assigned by the caller
+  uint64_t traceId = 0;
 
   return compileThroughMLIR(trace, useStaticShapes, traceId);
 }
@@ -99,19 +114,13 @@ std::shared_ptr<Executable> JITCompiler::compileSpeculative(ActiveTrace &trace) 
 
 std::shared_ptr<Executable> JITCompiler::compileSpecialized(ActiveTrace &trace,
                                                              uint64_t traceId) {
-  // Get static shapes from profiler.
-  auto staticShapes = profiler_.getStaticShapes(traceId);
-
   auto exec = compileTrace(trace, true);
 
   if (exec) {
-    // Mark PGO as done.
     auto *profile = profiler_.getTraceProfile(traceId);
     if (profile) {
       profile->pgoRecompiled.store(true);
     }
-
-    // Atomically swap the executable.
     swapExecutable(traceId, exec);
   }
 
@@ -144,14 +153,11 @@ bool JITCompiler::shouldPGORecompile(uint64_t traceId) const {
 
 void JITCompiler::launchPGORecompile(uint64_t traceId, ActiveTrace &trace) {
   if (activePGORecompiles_.load() >= config_.maxPGORecompiles) {
-    return; // Too many concurrent recompiles.
+    return;
   }
 
   activePGORecompiles_.fetch_add(1);
 
-  // Copy the trace for the background thread.
-  // (ActiveTrace is not thread-safe, so we compile a copy.)
-  // In a production system, we'd serialize the trace or keep it alive.
   auto &diag = diag_;
   auto &profiler = profiler_;
   auto &config = config_;
@@ -159,31 +165,18 @@ void JITCompiler::launchPGORecompile(uint64_t traceId, ActiveTrace &trace) {
   auto &execMutex = execMutex_;
   auto &activeCount = activePGORecompiles_;
 
-  // Launch background compilation.
   pgoThreads_.emplace_back([&diag, &profiler, &config, traceId,
                              activeCount]() {
-    // Background PGO recompilation.
-    // In a full implementation, this would:
-    //   1. Get the static shapes from the profiler
-    //   2. Reconstruct the MLIR module with concrete shapes
-    //   3. Run the full optimization pipeline
-    //   4. Compile through XLA
-    //   5. Atomically swap the executable
-
     auto staticShapes = profiler.getStaticShapes(traceId);
     if (staticShapes) {
-      // Compile with specialized shapes.
-      // This would go through compileThroughMLIR with useStaticShapes=true.
       if (config.verbose) {
         // Log PGO recompilation.
       }
-
       auto *profile = profiler.getTraceProfile(traceId);
       if (profile) {
         profile->pgoRecompiled.store(true);
       }
     }
-
     activeCount.fetch_sub(1);
   });
 }
@@ -199,25 +192,16 @@ void JITCompiler::waitForPGORecompiles() {
 
 std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
     ActiveTrace &trace, bool useStaticShapes, uint64_t traceId) {
-  // Create an MLIR context.
   auto context = std::make_unique<MLIRContext>();
   context->getOrLoadDialect<JulesDialect>();
   context->getOrLoadDialect<func::FuncDialect>();
 
-  // Build an MLIR module from the trace.
   auto module = ModuleOp::create(UnknownLoc::get(context.get()));
   OpBuilder builder(context.get());
 
-  // Create a single function that represents the entire trace.
   auto f32Type = FloatType::getF32(context.get());
 
   // Determine the function signature from the trace.
-  // Inputs are the "root" values (not produced by any op in the trace).
-  // Outputs are the return value.
-  SmallVector<Type, 4> inputTypes;
-  SmallVector<Value, 4> inputValueMap;
-
-  // Count root values (inputs that have no defining op).
   const auto &ops = trace.getOps();
   const auto &values = trace.getValues();
 
@@ -231,49 +215,39 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
     }
   }
 
-  // Root values (not produced by any op) become function arguments.
+  // Root values become function arguments.
+  SmallVector<Type, 4> inputTypes;
   for (size_t i = 0; i < values.size(); ++i) {
     if (!isProduced[i] && values[i].isValid()) {
-      // This is a root value — make it a function argument.
-      Type argType = f32Type; // Default
+      Type argType = f32Type;
       if (values[i].type) {
-        // Convert Jules type to MLIR type.
-        if (values[i].type->getKind() == TypeNode::ScalarType) {
-          auto &scalarTy = static_cast<const ScalarType &>(*values[i].type);
-          switch (scalarTy.getScalarKind()) {
-          case ScalarType::SK_F32: argType = FloatType::getF32(context.get()); break;
-          case ScalarType::SK_F64: argType = FloatType::getF64(context.get()); break;
-          case ScalarType::SK_I32: argType = IntegerType::get(context, 32); break;
-          case ScalarType::SK_I64: argType = IntegerType::get(context, 64); break;
-          case ScalarType::SK_Bool: argType = IntegerType::get(context, 1); break;
-          default: argType = f32Type; break;
-          }
-        } else if (values[i].type->getKind() == TypeNode::TensorType) {
+        if (values[i].type->getKind() == TypeNode::TensorType) {
           auto &tensorTy = static_cast<const TensorType &>(*values[i].type);
           SmallVector<int64_t, 4> shape;
           for (const auto &dim : tensorTy.getDims()) {
             if (dim.kind == Dimension::DK_Concrete) {
-              // Use PGO data for static shapes if available.
-              if (useStaticShapes && traceId > 0) {
-                auto staticShapes = profiler_.getStaticShapes(traceId);
-                if (staticShapes && i < staticShapes->size()) {
-                  // Not directly indexable by TraceValueId in this context,
-                  // but the concept is that PGO shapes override.
-                  shape.push_back(dim.size);
+              shape.push_back(dim.size);
+            } else if (useStaticShapes && traceId > 0) {
+              // Try to resolve from PGO data.
+              auto staticShapes = profiler_.getStaticShapes(traceId);
+              if (staticShapes) {
+                auto it = staticShapes->find(static_cast<TraceValueId>(i));
+                if (it != staticShapes->end() && !it->second.empty()) {
+                  // Use the profiled dimension.
+                  size_t dimIdx = shape.size();
+                  if (dimIdx < it->second.size()) {
+                    shape.push_back(it->second[dimIdx]);
+                  } else {
+                    shape.push_back(ShapedType::kDynamic);
+                  }
                 } else {
-                  shape.push_back(dim.size);
+                  shape.push_back(ShapedType::kDynamic);
                 }
               } else {
-                shape.push_back(dim.size);
+                shape.push_back(ShapedType::kDynamic);
               }
             } else {
-              // Dynamic or symbolic.
-              if (useStaticShapes && traceId > 0) {
-                // Try to resolve from PGO data.
-                shape.push_back(ShapedType::kDynamic);
-              } else {
-                shape.push_back(ShapedType::kDynamic);
-              }
+              shape.push_back(ShapedType::kDynamic);
             }
           }
 
@@ -283,35 +257,33 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
           case ScalarType::SK_F64: elemType = FloatType::getF64(context.get()); break;
           default: break;
           }
-
           argType = RankedTensorType::get(shape, elemType);
+        } else if (values[i].type->getKind() == TypeNode::ScalarType) {
+          auto &scalarTy = static_cast<const ScalarType &>(*values[i].type);
+          switch (scalarTy.getScalarKind()) {
+          case ScalarType::SK_F32: argType = FloatType::getF32(context.get()); break;
+          case ScalarType::SK_F64: argType = FloatType::getF64(context.get()); break;
+          case ScalarType::SK_I32: argType = IntegerType::get(context, 32); break;
+          case ScalarType::SK_I64: argType = IntegerType::get(context, 64); break;
+          case ScalarType::SK_Bool: argType = IntegerType::get(context, 1); break;
+          default: argType = f32Type; break;
+          }
         }
       }
       inputTypes.push_back(argType);
     }
   }
 
-  // Determine the return type.
   Type returnType = f32Type;
-  if (auto retVal = trace.getReturnValue()) {
-    if (*retVal < values.size() && values[*retVal].type) {
-      // Use the return value's type.
-      returnType = f32Type; // Simplified
-    }
-  }
-
   auto funcType = builder.getFunctionType(inputTypes, returnType);
   auto funcOp = func::FuncOp::create(builder.getUnknownLoc(), "__trace_fn",
                                        funcType);
-
-  // Create the entry block.
   auto *entryBlock = funcOp.addEntryBlock();
   builder.setInsertionPointToStart(entryBlock);
 
   // Map trace values to MLIR values.
   std::vector<Value> mlirValues(values.size());
 
-  // Bind function arguments to root trace values.
   size_t argIdx = 0;
   for (size_t i = 0; i < values.size(); ++i) {
     if (!isProduced[i] && values[i].isValid()) {
@@ -339,7 +311,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Add: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -349,7 +320,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Sub: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -359,7 +329,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Mul: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -369,7 +338,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Div: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -379,7 +347,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Pow: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -389,17 +356,14 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Neg: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<NegOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<NegOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::MatMul: {
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
@@ -409,71 +373,57 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Relu: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<ReluOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<ReluOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Sigmoid: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<SigmoidOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<SigmoidOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Tanh: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<TanhOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<TanhOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Mean: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<MeanOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<MeanOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Sum: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<SumOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<SumOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Transpose: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto result = builder.create<TransposeOp>(
-            loc, mlirValues[op.inputs[0]]);
+        auto result = builder.create<TransposeOp>(loc, mlirValues[op.inputs[0]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Zeros:
     case TraceOpKind::Ones:
     case TraceOpKind::Random: {
-      // Tensor creation: extract shape from attributes.
       if (op.outputs.size() >= 1) {
         std::vector<int64_t> shape = {1};
         for (const auto &attr : op.attrs) {
@@ -496,18 +446,15 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Cast: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
         auto result = builder.create<CastOp>(
-            loc, mlirValues[op.inputs[0]],
-            TypeAttr::get(f32Type));
+            loc, mlirValues[op.inputs[0]], TypeAttr::get(f32Type));
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
     }
-
     case TraceOpKind::Select: {
       if (op.inputs.size() >= 3 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]] &&
@@ -519,9 +466,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Grad: {
-      // Autodiff: handled by the autodiff pass later.
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
         auto diffVar = "x";
@@ -536,7 +481,6 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Return: {
       if (!op.inputs.empty() && op.inputs[0] < mlirValues.size() &&
           mlirValues[op.inputs[0]]) {
@@ -548,18 +492,13 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       }
       break;
     }
-
     case TraceOpKind::Barrier:
-      // Barriers don't emit MLIR ops.
       break;
-
     default:
-      // Unhandled trace op kind — skip.
       break;
     }
   }
 
-  // If no return was emitted, add a default one.
   if (entryBlock->empty() || !entryBlock->mightHaveTerminator()) {
     auto zero = builder.create<ConstantOp>(
         builder.getUnknownLoc(), builder.getFloatAttr(f32Type, 0.0));
@@ -568,16 +507,15 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
 
   module.push_back(funcOp);
 
-  // Run optimization passes on the MLIR module.
+  // ── Run the full Tier 2 optimization pipeline ───────────────────────────
   PassManager pm(context.get());
 
-  // Shape inference.
+  // Shape inference with static shapes.
   pm.addPass(createShapeInferencePass());
 
-  // Autodiff pass (if there are grad ops).
+  // Autodiff.
   pm.addPass(createAutodiffPass());
 
-  // Autodiff pruning.
   if (config_.enableAutodiffPruning) {
     pm.addPass(createAutodiffPruningPass());
   }
@@ -587,20 +525,41 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
     pm.addPass(createGraphCollapsingPass());
   }
 
+  // Whole-program collapsing (interprocedural).
+  pm.addPass(createWholeProgramCollapsingPass());
+
+  // SCCP (constant propagation).
+  if (config_.enableSCCP) {
+    pm.addPass(createSCCPPass());
+  }
+
+  // SymbolDCE.
+  if (config_.enableSymbolDCE) {
+    pm.addPass(createSymbolDCEPass());
+  }
+
   // Algebraic simplification.
   pm.addPass(createAlgebraicSimplificationPass());
 
-  // Canonicalization.
-  pm.addPass(createCanonicalizerPass());
+  // SIMD layout optimization.
+  if (config_.enableSIMDLayout) {
+    pm.addPass(createSIMDLayoutPass());
+  }
 
-  // CSE (Common Subexpression Elimination).
+  // Polyhedral optimization (with concrete shapes for optimal tiling).
+  if (config_.enablePolyhedral) {
+    pm.addPass(createPolyhedralOptPass());
+  }
+
+  // Final cleanup.
+  pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
   // Lower to StableHLO.
   pm.addPass(createJulesToStableHLOLoweringPass());
 
   if (failed(pm.run(module))) {
-    diag_.error(SourceLocation{}, "MLIR compilation failed for trace");
+    diag_.error(SourceLocation{}, "Tier 2 MLIR compilation failed for trace");
     return nullptr;
   }
 

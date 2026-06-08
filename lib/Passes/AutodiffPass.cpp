@@ -264,8 +264,88 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
     auto grad = builder.create<TransposeOp>(op->getLoc(), incomingAdjoint);
     addAdjoint(transposeOp.getInput(), grad.getResult());
   }
-  // For other operations (e.g., concat, select, reshape), we skip
-  // differentiation for now. A complete implementation would handle all ops.
+  else if (auto concatOp = dyn_cast<ConcatOp>(op)) {
+    // d(concat(inputs, axis))/d(input_i) = slice(dL, ...)
+    // Extract the portion of the incoming adjoint that corresponds to each input.
+    auto resultType = concatOp.getResult().getType().dyn_cast<RankedTensorType>();
+    if (resultType) {
+      int64_t axis = concatOp.getAxis();
+      int64_t offset = 0;
+
+      for (auto input : concatOp.getInputs()) {
+        auto inputType = input.getType().dyn_cast<RankedTensorType>();
+        if (!inputType) {
+          // Skip inputs without static shape info.
+          continue;
+        }
+
+        int64_t rank = resultType.getRank();
+        SmallVector<int64_t, 4> startIndices(rank, 0);
+        SmallVector<int64_t, 4> limitIndices;
+        SmallVector<int64_t, 4> strides(rank, 1);
+
+        for (int64_t d = 0; d < rank; ++d) {
+          limitIndices.push_back(resultType.getDimSize(d));
+        }
+
+        startIndices[axis] = offset;
+        limitIndices[axis] = offset + inputType.getDimSize(axis);
+        offset += inputType.getDimSize(axis);
+
+        // Compute the slice result type.
+        SmallVector<int64_t, 4> sliceShape;
+        for (int64_t d = 0; d < rank; ++d) {
+          sliceShape.push_back((limitIndices[d] - startIndices[d]) / strides[d]);
+        }
+        auto sliceResultType = RankedTensorType::get(
+            sliceShape, inputType.getElementType());
+
+        auto grad = builder.create<SliceOp>(
+            op->getLoc(), sliceResultType, incomingAdjoint,
+            builder.getI64ArrayAttr(startIndices),
+            builder.getI64ArrayAttr(limitIndices),
+            builder.getI64ArrayAttr(strides));
+        addAdjoint(input, grad.getResult());
+      }
+    }
+  }
+  else if (auto selectOp = dyn_cast<SelectOp>(op)) {
+    // d(select(cond, a, b))/da = select(cond, dL, zeros)
+    // d(select(cond, a, b))/db = select(cond, zeros, dL)
+    auto trueType = selectOp.getTrueValue().getType().dyn_cast<RankedTensorType>();
+    if (trueType) {
+      auto zeros = builder.create<ZerosOp>(op->getLoc(), trueType);
+      auto gradA = builder.create<SelectOp>(
+          op->getLoc(), selectOp.getCondition(), incomingAdjoint,
+          zeros.getResult());
+      auto gradB = builder.create<SelectOp>(
+          op->getLoc(), selectOp.getCondition(), zeros.getResult(),
+          incomingAdjoint);
+      addAdjoint(selectOp.getTrueValue(), gradA.getResult());
+      addAdjoint(selectOp.getFalseValue(), gradB.getResult());
+    }
+  }
+  else if (auto reshapeOp = dyn_cast<ReshapeOp>(op)) {
+    // d(reshape(a, new_shape))/da = reshape(dL, shape(a))
+    auto inputType = reshapeOp.getInput().getType().dyn_cast<RankedTensorType>();
+    if (inputType) {
+      auto grad = builder.create<ReshapeOp>(
+          op->getLoc(), incomingAdjoint, inputType);
+      addAdjoint(reshapeOp.getInput(), grad.getResult());
+    }
+  }
+  else if (auto sliceOp = dyn_cast<SliceOp>(op)) {
+    // d(slice(a, ...))/da = pad(dL, ...) — pad the adjoint back to the
+    // original input shape.
+    // Since Jules doesn't have a pad op, we create a zeros tensor of the
+    // input shape. A full implementation would use a pad operation to insert
+    // the adjoint slice into the correct position within the zeros tensor.
+    auto inputType = sliceOp.getInput().getType().dyn_cast<RankedTensorType>();
+    if (inputType) {
+      auto zerosGrad = builder.create<ZerosOp>(op->getLoc(), inputType);
+      addAdjoint(sliceOp.getInput(), zerosGrad.getResult());
+    }
+  }
   else {
     // Operation not differentiable — pass through zero gradient.
     // This is a conservative choice: it will produce correct results
