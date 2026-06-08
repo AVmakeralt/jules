@@ -465,4 +465,13 @@ void jules::registerJulesPasses() {
   registerPass([]() -> std::unique_ptr<Pass> {
     return createJulesToStableHLOLoweringPass();
   });
+  registerPass([]() -> std::unique_ptr<Pass> {
+    return createGraphCollapsingPass();
+  });
+  registerPass([]() -> std::unique_ptr<Pass> {
+    return createAlgebraicSimplificationPass();
+  });
+  registerPass([]() -> std::unique_ptr<Pass> {
+    return createAutodiffPruningPass();
+  });
 }
