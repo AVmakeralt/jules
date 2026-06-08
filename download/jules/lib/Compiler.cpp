@@ -3,7 +3,7 @@
 // Copyright (c) 2025 Jules Contributors
 //
 // This file implements the top-level Compiler driver that orchestrates the
-// full compilation pipeline.
+// full compilation pipeline, including the two-tier AOT/JIT hybrid system.
 //
 //===----------------------------------------------------------------------===//
 
@@ -59,7 +59,6 @@ bool Compiler::compile() {
 
   // If we're only emitting the AST, dump it and stop.
   if (options_.emissionMode == CompilerOptions::EmitAST) {
-    // Print the AST to stdout or the output file.
     std::ostream &out = (options_.outputFile == "-" || options_.outputFile.empty())
                             ? std::cout
                             : *(new std::ofstream(options_.outputFile));
@@ -83,27 +82,33 @@ bool Compiler::compile() {
     }
   }
 
-  // Step 6: Lower to StableHLO if requested.
+  // Step 6: Run the full AOT optimization pipeline (if emitting executable or tiered).
+  if (options_.emissionMode >= CompilerOptions::EmitExecutable) {
+    if (!runAOTOptimizations()) {
+      return false;
+    }
+  }
+
+  // Step 7: Lower to StableHLO if requested.
   if (options_.emissionMode >= CompilerOptions::EmitStableHLO) {
     if (!lowerToStableHLO()) {
       return false;
     }
   }
 
-  // Step 7: Compile through XLA if requested.
+  // Step 8: Compile through XLA if requested.
   if (options_.emissionMode == CompilerOptions::EmitExecutable) {
     if (!compileXLA()) {
       return false;
     }
   }
 
-  // Step 8: Emit output.
+  // Step 9: Emit output.
   return emitOutput();
 }
 
 std::string Compiler::readSource() {
   if (options_.inputFile == "-" || options_.inputFile.empty()) {
-    // Read from stdin.
     std::ostringstream ss;
     ss << std::cin.rdbuf();
     return ss.str();
@@ -168,8 +173,63 @@ bool Compiler::runAutodiffPass() {
   pm.addPass(createShapeInferencePass());
   pm.addPass(createAutodiffPass());
 
+  if (options_.enableAutodiffPruning) {
+    pm.addPass(createAutodiffPruningPass());
+  }
+
   if (failed(pm.run(*mlirModule_))) {
     diag_.error(SourceLocation{}, "autodiff pass failed");
+    return false;
+  }
+
+  return true;
+}
+
+bool Compiler::runAOTOptimizations() {
+  if (!mlirModule_) return false;
+
+  PassManager pm(mlirContext_.get());
+
+  // ── Phase 1: Shape Inference ─────────────────────────────────────────────
+  pm.addPass(createShapeInferencePass());
+
+  // ── Phase 2: Graph Collapsing ───────────────────────────────────────────
+  if (options_.enableGraphCollapsing) {
+    pm.addPass(createGraphCollapsingPass());
+  }
+
+  // ── Phase 3: Whole-Program Collapsing ───────────────────────────────────
+  pm.addPass(createWholeProgramCollapsingPass());
+
+  // ── Phase 4: SCCP (Constant Propagation) ────────────────────────────────
+  if (options_.enableSCCP) {
+    pm.addPass(createSCCPPass());
+  }
+
+  // ── Phase 5: SymbolDCE ──────────────────────────────────────────────────
+  if (options_.enableSymbolDCE) {
+    pm.addPass(createSymbolDCEPass());
+  }
+
+  // ── Phase 6: Algebraic Simplification ───────────────────────────────────
+  pm.addPass(createAlgebraicSimplificationPass());
+
+  // ── Phase 7: SIMD Layout Optimization ───────────────────────────────────
+  if (options_.enableSIMDLayout) {
+    pm.addPass(createSIMDLayoutPass());
+  }
+
+  // ── Phase 8: Polyhedral Optimization ────────────────────────────────────
+  if (options_.enablePolyhedral) {
+    pm.addPass(createPolyhedralOptPass());
+  }
+
+  // ── Phase 9: Final Cleanup ──────────────────────────────────────────────
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
+  if (failed(pm.run(*mlirModule_))) {
+    diag_.error(SourceLocation{}, "AOT optimization pipeline failed");
     return false;
   }
 
@@ -192,22 +252,7 @@ bool Compiler::lowerToStableHLO() {
 }
 
 bool Compiler::compileXLA() {
-  // XLA compilation requires the XLA runtime library.
-  // This step:
-  //   1. Serializes the StableHLO module to a protobuf representation
-  //   2. Invokes the XLA compiler to produce an executable
-  //   3. Optionally runs the executable
-  //
-  // The actual implementation depends on the XLA client library being
-  // linked. For a standalone compiler, we serialize the StableHLO and
-  // the user can feed it to the xla_compile tool.
-
   if (!mlirModule_) return false;
-
-  // Serialize the module to portable serialization format.
-  // This requires the stablehlo::serializePortableArtifact function.
-  // For now, we emit the MLIR text representation, which can be
-  // consumed by the xla_compile tool.
 
   if (options_.verbose) {
     std::cerr << "Compiling through XLA for target: " << options_.xlaTarget
@@ -223,7 +268,6 @@ bool Compiler::emitOutput() {
     return false;
   }
 
-  // Determine the output stream.
   std::ostream *out = &std::cout;
   std::ofstream outFile;
   if (options_.outputFile != "-" && !options_.outputFile.empty()) {
@@ -236,9 +280,7 @@ bool Compiler::emitOutput() {
     out = &outFile;
   }
 
-  // Emit MLIR.
   if (mlirModule_) {
-    // Print the MLIR module.
     auto printingFlags = OpPrintingFlags();
     printingFlags.useLocalScope();
     printingFlags.enableDebugInfo();

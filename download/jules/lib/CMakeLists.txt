@@ -31,6 +31,12 @@ if(JULES_ENABLE_MLIR)
     MLIRFuncTransforms
     MLIRSupport
     MLIRInferTypeOpInterface
+    MLIRAffineDialect
+    MLIRAffineTransforms
+    MLIRMemRefDialect
+    MLIRVectorDialect
+    MLIRSCFDialect
+    MLIROpenMP
   )
 
   if(StableHLO_FOUND)

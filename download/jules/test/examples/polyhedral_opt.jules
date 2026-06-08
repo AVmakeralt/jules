@@ -1,0 +1,27 @@
+// ── Polyhedral Optimization Example ────────────────────────────────────────
+//
+// This example demonstrates how the polyhedral (affine) optimization pass
+// restructures loops for maximum cache locality and SIMD execution.
+//
+// The matmul + bias_add + relu pattern is a common ML kernel that
+// benefits from:
+//   - Loop tiling: 32x32 cache-friendly blocks
+//   - Loop fusion: matmul + bias_add + relu → single fused kernel
+//   - SIMD vectorization: XLA generates AVX-512/Neon SIMD loops
+
+mlp_layer : ([32,784]f32, [784,256]f32, [256]f32) -> [32,256]f32
+mlp_layer (x, w, b) = relu(x ** w + b)
+
+two_layer_mlp : ([32,784]f32) -> [32,10]f32
+two_layer_mlp x =
+  let w1 = random([784,256]f32)
+  in let b1 = zeros([256]f32)
+  in let h1 = mlp_layer(x, w1, b1)
+  in let w2 = random([256,10]f32)
+  in let b2 = zeros([10]f32)
+  in relu(h1 ** w2 + b2)
+
+main : () -> [32,10]f32
+main () =
+  let x = random([32,784]f32)
+  in two_layer_mlp(x)

@@ -10,14 +10,20 @@
 // This file defines the top-level Compiler driver that orchestrates the
 // full compilation pipeline:
 //
-//   Source -> Lexer -> Parser -> TypeChecker -> MLIR Gen -> Passes -> Output
+//   AOT Mode (Tier 1):
+//     Source → Lexer → Parser → TypeChecker → MLIR Gen → Passes → StableHLO → XLA
+//
+//   JIT Mode (Two-Tier Hybrid):
+//     Source → AOT Compile (Tier 1) → Runtime Execution → PGO Profiling
+//            → Background JIT Compile (Tier 2) → Tier 2 Dispatch
 //
 // The compiler can produce:
 //   - An AST dump (for debugging)
 //   - MLIR in the Jules dialect
 //   - MLIR after autodiff transformation
 //   - MLIR lowered to StableHLO
-//   - An XLA executable (when XLA runtime is available)
+//   - A Tier 1 AOT executable (dynamic shapes, zero cold-start)
+//   - A Tiered execution engine (AOT + JIT hybrid)
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,6 +43,8 @@ class OpPrintingFlags;
 namespace jules {
 
 class Program;
+class TieredExecution;
+struct TieredExecutionConfig;
 
 /// Configuration for the compiler pipeline.
 struct CompilerOptions {
@@ -53,6 +61,7 @@ struct CompilerOptions {
     EmitMLIRAfterAD,  // Emit MLIR after autodiff pass
     EmitStableHLO,    // Emit MLIR lowered to StableHLO
     EmitExecutable,   // Compile through XLA to an executable
+    EmitTiered,       // Compile with two-tier AOT/JIT hybrid
   };
 
   EmissionMode emissionMode = EmitMLIR;
@@ -68,6 +77,41 @@ struct CompilerOptions {
 
   /// Target backend for XLA compilation.
   std::string xlaTarget = "cpu";  // "cpu", "cuda", "rocm", "tpu"
+
+  // ── Two-Tier AOT/JIT Options ────────────────────────────────────────────
+
+  /// Whether to enable Tier 2 JIT compilation.
+  bool enableTier2 = true;
+
+  /// Whether to enable PGO profiling.
+  bool enablePGO = true;
+
+  /// Number of warmup iterations before PGO recompilation.
+  uint64_t pgoWarmupThreshold = 10;
+
+  /// Whether to enable graph collapsing passes.
+  bool enableGraphCollapsing = true;
+
+  /// Whether to enable autodiff pruning.
+  bool enableAutodiffPruning = true;
+
+  /// Whether to enable SCCP (constant propagation).
+  bool enableSCCP = true;
+
+  /// Whether to enable SymbolDCE.
+  bool enableSymbolDCE = true;
+
+  /// Whether to enable SIMD layout optimization.
+  bool enableSIMDLayout = true;
+
+  /// Whether to enable polyhedral (affine) optimization.
+  bool enablePolyhedral = true;
+
+  /// Whether to inject telemetry hooks for PGO profiling.
+  bool injectTelemetryHooks = true;
+
+  /// Number of JIT worker threads.
+  unsigned jitWorkers = 2;
 };
 
 /// The main compiler driver.
@@ -104,6 +148,9 @@ private:
 
   /// Compile through XLA to an executable.
   bool compileXLA();
+
+  /// Run the full AOT optimization pipeline (including new passes).
+  bool runAOTOptimizations();
 
   /// Emit the current MLIR module to the output.
   bool emitOutput();
