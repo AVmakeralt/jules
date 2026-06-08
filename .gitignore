@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Internal / agent files
+skills/
+download/
+upload/
+worklog.md
+*.pyc
+__pycache__/
+node_modules/
