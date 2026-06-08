@@ -23,6 +23,10 @@ Thumbs.db
 .env
 .env.*
 
+# Benchmark binaries
+benchmarks/bench_kernel
+benchmarks/bench_kernel_mkl
+
 # Internal / agent files
 skills/
 download/
