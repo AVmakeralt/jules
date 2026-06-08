@@ -84,10 +84,13 @@ struct SIMDLayoutPass
         return;
       }
 
-      // Verify that all operands have compatible (broadcastable) shapes.
-      // If shapes are compatible, XLA will generate SIMD loops.
-      // No explicit annotation needed — the structured op pattern
-      // is sufficient for XLA to recognize SIMD opportunities.
+      // Add SIMD vectorization and contiguous-layout attributes so that
+      // XLA can recognize and emit SIMD loops for these ops.
+      op->setAttr("simd.vectorize", UnitAttr::get(op->getContext()));
+      op->setAttr("simd.contiguous", UnitAttr::get(op->getContext()));
+      op->setAttr("simd.preferred_width",
+                  IntegerAttr::get(op->getContext(),
+                                   IntegerType::get(op->getContext(), 64), 512));
     });
 
     // ── Phase 3: Matmul Contraction Hints ──────────────────────────────────
@@ -102,7 +105,7 @@ struct SIMDLayoutPass
     funcOp.walk([&](MatMulOp matmulOp) {
       // The contraction dimensions are set during lowering to StableHLO.
       // Here, we verify that the input shapes are compatible with
-      // vectorized matmul execution.
+      // vectorized matmul execution and add alignment hints.
       auto lhsType = matmulOp.getLhs().getType().dyn_cast<RankedTensorType>();
       auto rhsType = matmulOp.getRhs().getType().dyn_cast<RankedTensorType>();
 
@@ -121,6 +124,15 @@ struct SIMDLayoutPass
           // shape checking at runtime.
         }
       }
+
+      // Add SIMD alignment hint for AVX-512 (64-byte alignment).
+      matmulOp->setAttr("simd.alignment",
+                        IntegerAttr::get(matmulOp->getContext(),
+                                         IntegerType::get(matmulOp->getContext(), 64), 64));
+      // Add preferred SIMD width for matmul (512-bit for AVX-512).
+      matmulOp->setAttr("simd.preferred_width",
+                        IntegerAttr::get(matmulOp->getContext(),
+                                         IntegerType::get(matmulOp->getContext(), 64), 512));
     });
 
     // ── Phase 4: Alignment Hints ───────────────────────────────────────────
@@ -132,6 +144,43 @@ struct SIMDLayoutPass
     // In the Jules dialect, we don't directly create memref allocations,
     // so alignment is handled by XLA. This pass ensures that the tensor
     // shapes and layouts are structured for optimal XLA SIMD generation.
+
+    // Add alignment attribute to all tensor constants for AVX-512.
+    funcOp.walk([&](ConstantOp constOp) {
+      auto resultType = constOp.getResult().getType();
+      auto tensorType = resultType.dyn_cast<RankedTensorType>();
+      if (!tensorType) return;
+
+      constOp->setAttr("simd.alignment",
+                        IntegerAttr::get(constOp->getContext(),
+                                         IntegerType::get(constOp->getContext(), 64), 64));
+    });
+
+    // ── Phase 5: Contiguous Layout Enforcement ────────────────────────────
+    //
+    // For any op that might produce a non-contiguous result (e.g., transpose),
+    // insert a "simd.ensure_contiguous" attribute. The runtime/lowering
+    // stages read this and insert a copy-to-contiguous when needed.
+    // This guarantees that downstream SIMD consumers always see contiguous
+    // row-major data.
+
+    funcOp.walk([&](Operation *op) {
+      // Skip if already annotated with contiguous.
+      if (op->hasAttr("simd.contiguous")) return;
+
+      // Mark transpose-like and reshape-like ops as needing contiguous
+      // output enforcement.  The downstream lowering will insert an
+      // explicit copy when the output may be non-contiguous.
+      if (op->getName().getStringRef().contains("transpose") ||
+          op->getName().getStringRef().contains("reshape") ||
+          op->getName().getStringRef().contains("broadcast_in_dim")) {
+        op->setAttr("simd.ensure_contiguous",
+                    UnitAttr::get(op->getContext()));
+        op->setAttr("simd.alignment",
+                    IntegerAttr::get(op->getContext(),
+                                     IntegerType::get(op->getContext(), 64), 64));
+      }
+    });
   }
 };
 

@@ -238,20 +238,33 @@ CompilationResult JITQueue::processJob(CompilationJob &job) {
   // The result would be a serialized StableHLO module ready for XLA.
 
   try {
-    // Build the Tier 2 executable handle.
-    auto execHandle = std::make_shared<ExecutableHandle>();
-    execHandle->id = job.id;
-    execHandle->tier = ExecutableHandle::Tier2_JIT;
-    execHandle->specializedShapes = job.targetShapes;
-
-    // In a full implementation, we would compile the trace here
-    // and store the result in execHandle->serializedModule.
-    // For now, we mark it as a successful Tier 2 compilation.
-    execHandle->serializedModule =
-        "// Tier 2 JIT compiled: " + job.functionName + "\n";
-
-    result.success = true;
-    result.executable = execHandle;
+    if (config_.compileFn) {
+      // Use the provided compilation function to compile through the MLIR
+      // pipeline.
+      auto compiled = config_.compileFn(job.functionName, job.targetShapes,
+                                         job.traceId);
+      if (compiled) {
+        compiled->id = job.id;
+        compiled->tier = ExecutableHandle::Tier2_JIT;
+        compiled->specializedShapes = job.targetShapes;
+        result.executable = compiled;
+        result.success = true;
+      } else {
+        result.success = false;
+        result.errorMessage = "JIT compilation returned null";
+      }
+    } else {
+      // Fallback: create a stub executable handle when no compile function
+      // is provided.
+      auto execHandle = std::make_shared<ExecutableHandle>();
+      execHandle->id = job.id;
+      execHandle->tier = ExecutableHandle::Tier2_JIT;
+      execHandle->specializedShapes = job.targetShapes;
+      execHandle->serializedModule =
+          "// Tier 2 JIT compiled: " + job.functionName + "\n";
+      result.success = true;
+      result.executable = execHandle;
+    }
 
   } catch (const std::exception &e) {
     result.success = false;

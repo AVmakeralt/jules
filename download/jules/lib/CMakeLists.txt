@@ -36,6 +36,9 @@ if(JULES_ENABLE_MLIR)
     MLIRMemRefDialect
     MLIRVectorDialect
     MLIRSCFDialect
+    MLIRArithDialect
+    MLIRBufferizationDialect
+    MLIRMathDialect
     MLIROpenMP
   )
 

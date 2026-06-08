@@ -17,6 +17,7 @@
 #include "jules/Dialect/JulesDialect.h"
 #include "jules/Dialect/JulesOps.h"
 #include "jules/Passes/Passes.h"
+#include "jules/PJRT.h"
 
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -257,6 +258,33 @@ bool Compiler::compileXLA() {
   if (options_.verbose) {
     std::cerr << "Compiling through XLA for target: " << options_.xlaTarget
               << std::endl;
+  }
+
+  // Serialize the MLIR module to string.
+  std::string mlirString;
+  {
+    llvm::raw_string_ostream os(mlirString);
+    mlirModule_->print(os);
+  }
+
+  // Create PJRT client for the target platform.
+  DiagnosticsEngine pjrtDiag(DiagnosticsEngine::defaultEmit);
+  auto pjrtClient = PJRTClient::create(options_.xlaTarget, pjrtDiag);
+  if (!pjrtClient) {
+    diag_.error(SourceLocation{},
+                "failed to create PJRT client for target: " + options_.xlaTarget);
+    return false;
+  }
+
+  // Compile and load the program through PJRT.
+  auto executable = pjrtClient->compileAndLoad(mlirString);
+  if (!executable) {
+    diag_.error(SourceLocation{}, "XLA compilation failed");
+    return false;
+  }
+
+  if (options_.verbose) {
+    std::cerr << "XLA compilation successful" << std::endl;
   }
 
   return true;

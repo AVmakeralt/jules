@@ -45,7 +45,7 @@ class PartialEvaluator {
 public:
   /// Evaluate a single operation if all inputs are constants.
   /// Returns true if the operation was folded.
-  bool tryEvaluate(Operation *op, PatternRewriter &rewriter) {
+  bool tryEvaluate(Operation *op, IRRewriter &rewriter) {
     // Check if all operands are constant.
     for (auto operand : op->getOperands()) {
       if (!isConstant(operand)) return false;
@@ -67,7 +67,7 @@ public:
 
 private:
   /// Try to fold an operation into a constant.
-  bool tryFoldOp(Operation *op, PatternRewriter &rewriter) {
+  bool tryFoldOp(Operation *op, IRRewriter &rewriter) {
     if (auto addOp = dyn_cast<AddOp>(op)) {
       return tryFoldBinary(addOp, rewriter,
                            [](double a, double b) { return a + b; });
@@ -118,7 +118,7 @@ private:
 
   /// Try to fold a binary operation with constant operands.
   template <typename OpTy>
-  bool tryFoldBinary(OpTy op, PatternRewriter &rewriter,
+  bool tryFoldBinary(OpTy op, IRRewriter &rewriter,
                      std::function<double(double, double)> foldFn) {
     auto lhsConst = getConstantValue(op.getLhs());
     auto rhsConst = getConstantValue(op.getRhs());
@@ -138,6 +138,13 @@ private:
       if (auto intAttr = constOp.getValueAttr().dyn_cast<IntegerAttr>()) {
         return static_cast<double>(intAttr.getInt());
       }
+      // Handle dense element attrs (tensor constants from previous folding).
+      if (auto denseAttr =
+              constOp.getValueAttr().dyn_cast<DenseFPElementsAttr>()) {
+        if (denseAttr.isSplat()) {
+          return denseAttr.getSplatValue<APFloat>().convertToDouble();
+        }
+      }
     }
     if (auto zerosOp = val.getDefiningOp<ZerosOp>()) {
       return 0.0;
@@ -151,13 +158,30 @@ private:
   /// Replace an operation with a constant value.
   template <typename OpTy>
   void replaceWithConstant(OpTy op, double value,
-                            PatternRewriter &rewriter) {
+                            IRRewriter &rewriter) {
     auto resultType = op.getResult().getType();
-    auto constOp = rewriter.create<ConstantOp>(
-        op.getLoc(), rewriter.getFloatAttr(
-            resultType.isa<FloatType>() ? resultType : rewriter.getF64Type(),
-            value));
-    rewriter.replaceOp(op, constOp.getResult());
+    Value constValue;
+    if (auto tensorType = resultType.dyn_cast<RankedTensorType>()) {
+      // Create a splat dense attribute for tensor types.
+      auto elemType = tensorType.getElementType().cast<FloatType>();
+      APFloat apValue(value);
+      bool losingInfo;
+      apValue.convert(elemType.getFloatSemantics(),
+                      APFloat::rmNearestTiesToEven, &losingInfo);
+      auto denseAttr = DenseFPElementsAttr::get(tensorType, apValue);
+      constValue =
+          rewriter.create<ConstantOp>(op.getLoc(), denseAttr).getResult();
+    } else {
+      auto floatType = resultType.isa<FloatType>()
+                            ? resultType.cast<FloatType>()
+                            : rewriter.getF64Type();
+      constValue = rewriter
+                       .create<ConstantOp>(
+                           op.getLoc(),
+                           rewriter.getFloatAttr(floatType, value))
+                       .getResult();
+    }
+    rewriter.replaceOp(op, constValue);
   }
 };
 
@@ -227,6 +251,7 @@ struct WholeProgramCollapsingPass
 
     // Phase 2: Per-function partial evaluation + constant folding.
     module.walk([&](func::FuncOp funcOp) {
+      IRRewriter rewriter(funcOp.getContext());
       PartialEvaluator evaluator;
 
       // Iterate until no more folding is possible (fixed-point).
@@ -258,11 +283,18 @@ struct WholeProgramCollapsingPass
           }
         });
 
-        // Fold the collected operations.
-        // Note: In a real implementation, we'd use an IRRewriter here.
-        // For this pass, we rely on MLIR's built-in fold mechanism
-        // combined with our graph collapsing and algebraic simplification
-        // passes to achieve the same effect iteratively.
+        // Actually fold the collected operations.
+        for (auto *op : foldableOps) {
+          // Skip ops that have already been erased.
+          if (!op->getBlock()) continue;
+
+          rewriter.setInsertionPoint(op);
+          if (evaluator.tryEvaluate(op, rewriter)) {
+            // The op's uses have been replaced with a constant. Erase it.
+            rewriter.eraseOp(op);
+            changed = true;
+          }
+        }
       }
     });
 

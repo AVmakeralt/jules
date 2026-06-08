@@ -537,6 +537,90 @@ struct ConstantOpLowering : public OpConversionPattern<ConstantOp> {
   }
 };
 
+// ── RandomOp ────────────────────────────────────────────────────────────────
+
+struct RandomOpLowering : public OpConversionPattern<RandomOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(RandomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.random -> stablehlo.rng
+    auto resultType = op.getResult().getType().dyn_cast<RankedTensorType>();
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor result");
+    }
+
+    // Create a constant seed state: tensor<2xui64> with values [0, 1].
+    auto seedType = RankedTensorType::get({2}, rewriter.getIntegerType(64));
+    SmallVector<APInt, 2> seedValues = {APInt(64, 0), APInt(64, 1)};
+    auto seedAttr = DenseIntElementsAttr::get(seedType, seedValues);
+    auto seed = rewriter.create<stablehlo::ConstantOp>(op.getLoc(), seedAttr);
+
+    // Create a shape constant from the result type's shape.
+    SmallVector<int64_t, 4> shapeValues;
+    for (int64_t dim : resultType.getShape()) {
+      shapeValues.push_back(dim);
+    }
+    auto shapeType = RankedTensorType::get(
+        {static_cast<int64_t>(shapeValues.size())}, rewriter.getI64Type());
+    auto shapeAttr = DenseIntElementsAttr::get(shapeType, shapeValues);
+    auto shape = rewriter.create<stablehlo::ConstantOp>(op.getLoc(), shapeAttr);
+
+    // Create stablehlo.rng with UNIFORM distribution.
+    auto rngDistribution = stablehlo::RngDistributionAttr::get(
+        rewriter.getContext(), stablehlo::RngDistribution::UNIFORM);
+
+    rewriter.replaceOpWithNewOp<stablehlo::RngOp>(
+        op, op.getResult().getType(), seed, shape, rngDistribution);
+    return success();
+  }
+};
+
+// ── SliceOp ─────────────────────────────────────────────────────────────────
+
+struct SliceOpLowering : public OpConversionPattern<SliceOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(SliceOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.slice -> stablehlo.slice
+    auto resultType = op.getResult().getType().dyn_cast<RankedTensorType>();
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor result");
+    }
+
+    // Extract the I64ArrayAttr values as SmallVector<int64_t>.
+    auto extractI64Array = [](ArrayAttr arr) -> SmallVector<int64_t, 4> {
+      SmallVector<int64_t, 4> result;
+      for (auto attr : arr) {
+        result.push_back(attr.cast<IntegerAttr>().getInt());
+      }
+      return result;
+    };
+
+    auto startIndices = extractI64Array(
+        op->getAttr("start_indices").cast<ArrayAttr>());
+    auto limitIndices = extractI64Array(
+        op->getAttr("limit_indices").cast<ArrayAttr>());
+    auto strides = extractI64Array(
+        op->getAttr("strides").cast<ArrayAttr>());
+
+    int64_t rank = static_cast<int64_t>(startIndices.size());
+
+    // Convert to DenseIntElementsAttr for stablehlo.slice.
+    auto startAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), startIndices);
+    auto limitAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), limitIndices);
+    auto stridesDenseAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({rank}, rewriter.getI64Type()), strides);
+
+    rewriter.replaceOpWithNewOp<stablehlo::SliceOp>(
+        op, adaptor.getInput(), startAttr, limitAttr, stridesDenseAttr);
+    return success();
+  }
+};
+
 } // anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -566,7 +650,9 @@ void jules::populateJulesToStableHLOPatterns(RewritePatternSet &patterns,
     ConcatOpLowering,
     SelectOpLowering,
     CmpOpLowering,
-    ConstantOpLowering
+    ConstantOpLowering,
+    RandomOpLowering,
+    SliceOpLowering
   >(typeConverter, patterns.getContext());
 }
 

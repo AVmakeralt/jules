@@ -112,6 +112,15 @@ struct CompilationResult {
 /// registering the Tier 2 executable in the dispatch table.
 using CompilationCallback = std::function<void(const CompilationResult &)>;
 
+// ── Compilation Function ────────────────────────────────────────────────────
+
+/// A function that compiles a trace through the MLIR pipeline.
+/// Returns a compiled ExecutableHandle on success, or nullptr on failure.
+using CompilationFunction = std::function<std::shared_ptr<ExecutableHandle>(
+    const std::string &functionName,
+    const ShapeSignature &targetShapes,
+    uint64_t traceId)>;
+
 // ── JIT Queue Configuration ─────────────────────────────────────────────────
 
 struct JITQueueConfig {
@@ -123,6 +132,10 @@ struct JITQueueConfig {
 
   /// Whether to enable verbose logging.
   bool verbose = false;
+
+  /// The compilation function that actually compiles through the MLIR pipeline.
+  /// If not set, processJob() will create a stub executable handle.
+  CompilationFunction compileFn;
 };
 
 // ── JIT Queue ───────────────────────────────────────────────────────────────

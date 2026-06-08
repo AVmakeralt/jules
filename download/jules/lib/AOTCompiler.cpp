@@ -198,39 +198,49 @@ bool AOTCompiler::runAOTPipeline(ModuleOp module) {
 bool AOTCompiler::injectTelemetry(ModuleOp module) {
   // Inject telemetry hooks into the MLIR module for PGO profiling.
   //
-  // The telemetry hooks are lightweight operations that record:
+  // The telemetry hooks are lightweight attributes that record:
   //   1. The actual shapes of tensor inputs at each function call
   //   2. The execution frequency of each function
   //   3. Timing data for kernel execution
   //
-  // These hooks are implemented as calls to the runtime profiler API.
-  // In the MLIR, they appear as function calls to __jules_profile_*
-  // functions that are resolved at link time.
-  //
-  // For the AOT binary, we insert these calls at the entry point of
-  // each function and before each return instruction.
+  // These are implemented as MLIR attributes on each function and its
+  // arguments. The runtime environment reads these attributes and handles
+  // profiling accordingly. This is cleaner than inserting function calls
+  // that might not resolve at link time.
+
+  static uint32_t nextFuncId = 0;
 
   module.walk([&](func::FuncOp funcOp) {
     // Don't instrument internal/__jules functions.
     auto name = funcOp.getName();
     if (name.startswith("__jules_")) return;
 
-    // Insert a profiling call at the function entry.
-    OpBuilder builder(funcOp.getContext());
-    auto &entryBlock = funcOp.front();
-    builder.setInsertionPointToStart(&entryBlock);
+    // Add telemetry enabled attribute to the function.
+    funcOp->setAttr("jules.telemetry.enabled",
+                    UnitAttr::get(funcOp.getContext()));
 
-    // Create a call to the telemetry function.
-    // The telemetry function signature:
-    //   __jules_profile_entry(function_id : i32, input_shapes : memref<?xi64>)
-    //
-    // In a full implementation, we would:
-    //   1. Get the function ID from a global table
-    //   2. Pack the input shapes into a memref
-    //   3. Insert the call
-    //
-    // For now, we insert a marker that the runtime can recognize.
-    // The actual telemetry is handled by the runtime environment.
+    // Assign a unique function ID for telemetry correlation.
+    funcOp->setAttr("jules.telemetry.function_id",
+                    IntegerAttr::get(funcOp.getContext(),
+                                     IntegerType::get(funcOp.getContext(), 32),
+                                     nextFuncId++));
+
+    // Mark each argument with its position for shape tracking.
+    for (unsigned i = 0; i < funcOp.getNumArguments(); ++i) {
+      funcOp.setArgAttr(i, "jules.telemetry.shape_track",
+                        UnitAttr::get(funcOp.getContext()));
+    }
+
+    // Mark the first operation in the entry block as the telemetry entry
+    // point. The runtime uses this to insert profiling instrumentation.
+    if (!funcOp.empty()) {
+      auto &entryBlock = funcOp.front();
+      if (!entryBlock.empty()) {
+        auto &firstOp = entryBlock.front();
+        firstOp.setAttr("jules.telemetry.entry_point",
+                        UnitAttr::get(firstOp.getContext()));
+      }
+    }
   });
 
   return true;
