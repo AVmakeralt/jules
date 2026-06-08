@@ -12,6 +12,10 @@
 //   - AutodiffPass: Reverse-mode automatic differentiation at the MLIR level
 //   - JulesToStableHLOLoweringPass: Lower Jules dialect to StableHLO
 //   - ShapeInferencePass: Resolve symbolic dimensions
+//   - GraphCollapsingPass: Aggressive structural pruning
+//   - AlgebraicSimplificationPass: Mathematical identity simplification
+//   - AutodiffPruningPass: Clean up after autodiff
+//   - PGOPass: Profile-guided shape specialization
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,18 +31,28 @@ class Operation;
 
 namespace jules {
 
-/// Create the Autodiff pass. This pass walks the MLIR module, finds
-/// jules.grad operations, and expands them into the forward + backward
-/// computation graph using reverse-mode automatic differentiation.
+class Profiler;
+
+/// Create the Autodiff pass.
 std::unique_ptr<mlir::Pass> createAutodiffPass();
 
-/// Create the shape-inference pass. This pass resolves symbolic dimension
-/// variables in tensor types based on the constraints imposed by operations.
+/// Create the shape-inference pass.
 std::unique_ptr<mlir::Pass> createShapeInferencePass();
 
-/// Create the Jules-to-StableHLO lowering pass. This converts each Jules
-/// operation to its StableHLO equivalent, enabling XLA compilation.
+/// Create the Jules-to-StableHLO lowering pass.
 std::unique_ptr<mlir::Pass> createJulesToStableHLOLoweringPass();
+
+/// Create the graph collapsing pass.
+std::unique_ptr<mlir::Pass> createGraphCollapsingPass();
+
+/// Create the algebraic simplification pass.
+std::unique_ptr<mlir::Pass> createAlgebraicSimplificationPass();
+
+/// Create the autodiff pruning pass.
+std::unique_ptr<mlir::Pass> createAutodiffPruningPass();
+
+/// Create the PGO-informed optimization pass.
+std::unique_ptr<mlir::Pass> createPGOPass(const Profiler &profiler);
 
 /// Register all Jules passes with the MLIR pass pipeline.
 void registerJulesPasses();

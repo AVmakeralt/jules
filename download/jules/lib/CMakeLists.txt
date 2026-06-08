@@ -11,6 +11,10 @@ list(FILTER JULES_SOURCES EXCLUDE REGEX "tools/")
 # Define the Jules library.
 add_library(julesLib STATIC ${JULES_SOURCES})
 
+# Threading support for JIT PGO background recompilation.
+find_package(Threads REQUIRED)
+target_link_libraries(julesLib PUBLIC Threads::Threads)
+
 target_include_directories(julesLib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_BINARY_DIR}/../include
