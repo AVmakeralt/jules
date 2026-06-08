@@ -1,0 +1,12 @@
+-- simple_add.jules
+-- A minimal Jules program: add two scalar values.
+
+add : f32 -> f32 -> f32
+add a b = a + b
+
+main : () -> f32
+main () =
+    let x = 3.14
+    let y = 2.72
+    let result = add(x, y)
+    in result

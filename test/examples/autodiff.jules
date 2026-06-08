@@ -1,0 +1,30 @@
+-- autodiff.jules
+-- Demonstrates the automatic differentiation features of Jules.
+-- Shows gradients for various operations.
+
+-- Simple scalar function: f(x) = x^2
+square : f32 -> f32
+square x = x ^ 2
+
+-- Chain of operations: f(x) = relu(x * 3.0 + 1.0)
+chain : f32 -> f32
+chain x = relu(x * 3.0 + 1.0)
+
+-- Function composition: f(x) = sigmoid(square(x))
+composed : f32 -> f32
+composed x = sigmoid(square(x))
+
+main : () -> f32
+main () =
+    let x = 2.0
+
+    -- Gradient of x^2 at x=2.0 should be 2*2.0 = 4.0
+    let dsquare = grad(\x -> square(x), x)
+
+    -- Gradient through a chain of ops
+    let dchain = grad(\x -> chain(x), x)
+
+    -- Gradient through composed function
+    let dcomposed = grad(\x -> composed(x), x)
+
+    in dsquare
