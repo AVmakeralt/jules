@@ -12,6 +12,10 @@
 // Advantage: Intermediates stay in L1/L2 cache between forward and backward.
 //            Never written to RAM.
 //
+// v2: Multi-threaded tile processing via OpenMP. Each tile is independent
+//     in the forward pass. Gradient accumulation uses atomic adds for the
+//     weight gradients (dW1, dW2) and bias gradients (db1, db2).
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef JULES_KERNEL_INTERLEAVED_AUTODIFF_H
@@ -25,6 +29,11 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace jules {
 namespace kernel {
@@ -67,13 +76,27 @@ InterleavedMLPResult interleavedMLPForwardBackward(
     if (tile_m == 0) tile_m = 16;
 #endif
 
+    // Multi-threaded: parallelize across tiles
+    // Each thread processes a tile independently, then atomically
+    // accumulates gradients into the shared gradient buffers.
+    #pragma omp parallel for schedule(dynamic) reduction(+:total_loss) if(M > tile_m * 2)
     for (int ti = 0; ti < M; ti += tile_m) {
         int tm = std::min(tile_m, M - ti);
 
+        // Thread-local allocations (stack-based for thread safety)
+        std::vector<float> h_tile_vec(tm * N1);
+        std::vector<float> a_tile_vec(tm * N1);
+        std::vector<float> o_tile_vec(tm * N2);
+        std::vector<float> dL_do_vec(tm * N2);
+        std::vector<float> dL_da_vec(tm * N1);
+
+        float* h_tile = h_tile_vec.data();
+        float* a_tile = a_tile_vec.data();
+        float* o_tile = o_tile_vec.data();
+        float* dL_do = dL_do_vec.data();
+        float* dL_da = dL_da_vec.data();
+
         // ===== FORWARD PASS (one tile) =====
-        float* h_tile = arena.allocate<float>(tm * N1);
-        float* a_tile = arena.allocate<float>(tm * N1);
-        float* o_tile = arena.allocate<float>(tm * N2);
 
         // h_tile = X[ti:ti+tm, :] @ W1
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -115,7 +138,6 @@ InterleavedMLPResult interleavedMLPForwardBackward(
         memcpy(output + ti * N2, o_tile, tm * N2 * sizeof(float));
 
         // ===== LOSS + GRADIENT =====
-        float* dL_do = arena.allocate<float>(tm * N2);
         for (int i = 0; i < tm; i++) {
             float* row = o_tile + i * N2;
             float* grad_row = dL_do + i * N2;
@@ -140,18 +162,23 @@ InterleavedMLPResult interleavedMLPForwardBackward(
 
         // ===== BACKWARD PASS (one tile, while h_tile and a_tile are still in cache!) =====
 
-        // dL_dW2 += a_tile^T @ dL_do
+        // dL_dW2 += a_tile^T @ dL_do (needs atomic accumulation across threads)
+        // Use thread-local buffer then accumulate
+        std::vector<float> local_dW2(N1 * N2, 0.0f);
+        std::vector<float> local_db2(N2, 0.0f);
+        std::vector<float> local_dW1(K1 * N1, 0.0f);
+        std::vector<float> local_db1(N1, 0.0f);
+
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     N1, N2, tm, 1.0f, a_tile, N1, dL_do, N2,
-                    1.0f, dW2, N2);
+                    0.0f, local_dW2.data(), N2);
 
         // dL_db2 += sum(dL_do, axis=0)
         for (int i = 0; i < tm; i++)
             for (int j = 0; j < N2; j++)
-                db2[j] += dL_do[i * N2 + j];
+                local_db2[j] += dL_do[i * N2 + j];
 
         // dL_da = dL_do @ W2^T
-        float* dL_da = arena.allocate<float>(tm * N1);
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                     tm, N1, N2, 1.0f, dL_do, N2, W2, N2,
                     0.0f, dL_da, N1);
@@ -162,9 +189,7 @@ InterleavedMLPResult interleavedMLPForwardBackward(
             if (i + 15 < tm * N1) {
                 __m512 da = _mm512_loadu_ps(&dL_da[i]);
                 __m512 h  = _mm512_loadu_ps(&h_tile[i]);
-                // mask = h > 0
                 __mmask16 mask = _mm512_cmp_ps_mask(h, _mm512_setzero_ps(), _MM_CMPINT_GT);
-                // dh = mask ? da : 0
                 __m512 dh = _mm512_mask_blend_ps(mask, _mm512_setzero_ps(), da);
                 _mm512_storeu_ps(&dL_da[i], dh);
             } else {
@@ -180,22 +205,35 @@ InterleavedMLPResult interleavedMLPForwardBackward(
         // dL_dW1 += X[ti:ti+tm, :]^T @ dL_dh
         cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                     K1, N1, tm, 1.0f, X + ti * K1, K1, dL_da, N1,
-                    1.0f, dW1, N1);
+                    0.0f, local_dW1.data(), N1);
 
         // dL_db1 += sum(dL_dh, axis=0)
         for (int i = 0; i < tm; i++)
             for (int j = 0; j < N1; j++)
-                db1[j] += dL_da[i * N1 + j];
+                local_db1[j] += dL_da[i * N1 + j];
 
         // dL_dX += dL_dh @ W1^T
         if (dX) {
+            // Thread-safe: each tile writes to its own row range
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                         tm, K1, N1, 1.0f, dL_da, N1, W1, N1,
                         1.0f, dX + ti * K1, K1);
         }
 
-        // Discard intermediates — they were never in RAM
-        arena.reset();
+        // Atomically accumulate thread-local gradients into shared buffers
+        #pragma omp critical(jules_grad_accum)
+        {
+            // Accumulate dW1
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        K1, N2, 1, 1.0f,  // Just add the local buffer
+                        local_dW1.data(), N1, nullptr, N1,
+                        1.0f, dW1, N1);
+            // Manual accumulation for small buffers
+            for (int i = 0; i < K1 * N1; i++) dW1[i] += local_dW1[i];
+            for (int i = 0; i < N1; i++) db1[i] += local_db1[i];
+            for (int i = 0; i < N1 * N2; i++) dW2[i] += local_dW2[i];
+            for (int i = 0; i < N2; i++) db2[i] += local_db2[i];
+        }
     }
 
     total_loss /= M;

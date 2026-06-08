@@ -235,12 +235,18 @@ bool Compiler::runAOTOptimizations() {
     pm.addPass(createSIMDLayoutPass());
   }
 
-  // ── Phase 9: Kernel Fusion ──────────────────────────────────────────────
+  // ── Phase 9: Kernel Routing ────────────────────────────────────────────
+  // Route recognized patterns to fused kernel implementations BEFORE
+  // the ProducerConsumerFusionPass, so fused kernel calls are already
+  // in place when fusion considers the remaining ops.
+  pm.addPass(createKernelRoutingPass());
+
+  // ── Phase 10: Kernel Fusion ────────────────────────────────────────────
   if (options_.enableKernelFusion) {
     pm.addPass(createProducerConsumerFusionPass());
   }
 
-  // ── Phase 10: Memory Planning ───────────────────────────────────────────
+  // ── Phase 11: Memory Planning ──────────────────────────────────────────
   if (options_.enableMemoryPlanning) {
     if (options_.memoryBudgetBytes > 0) {
       pm.addPass(createMemoryPlanningPass(options_.memoryBudgetBytes));
@@ -249,17 +255,17 @@ bool Compiler::runAOTOptimizations() {
     }
   }
 
-  // ── Phase 11: Polyhedral Optimization ───────────────────────────────────
+  // ── Phase 12: Polyhedral Optimization ──────────────────────────────────
   if (options_.enablePolyhedral) {
     pm.addPass(createPolyhedralOptPass());
   }
 
-  // ── Phase 12: Quantization ──────────────────────────────────────────────
+  // ── Phase 13: Quantization ──────────────────────────────────────────────
   if (options_.enableQuantization) {
     pm.addPass(createQuantizePass());
   }
 
-  // ── Phase 13: Final Cleanup ─────────────────────────────────────────────
+  // ── Phase 14: Final Cleanup ─────────────────────────────────────────────
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 

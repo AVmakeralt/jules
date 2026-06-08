@@ -198,10 +198,38 @@ struct MatMulOpLowering : public OpConversionPattern<MatMulOp> {
         lhsBatchDims, rhsBatchDims,
         lhsContractDims, rhsContractDims);
 
+    // Build precision_config from matmul attributes if present.
+    // This is the fix for P1 #9: MixedPrecisionPass now sets
+    // compute_precision and accumulation_precision on the matmul op,
+    // and the StableHLO lowering emits the correct precision_config.
+    ArrayAttr precisionConfig;
+    if (op.getComputePrecision().has_value() ||
+        op.getAccumulationPrecision().has_value()) {
+      auto computePrec = op.getComputePrecision().value_or("f32");
+      auto accumPrec = op.getAccumulationPrecision().value_or("f32");
+
+      auto parsePrecision = [](StringRef s) -> stablehlo::Precision {
+        if (s == "bf16") return stablehlo::Precision::BF16;
+        if (s == "fp8e4m3") return stablehlo::Precision::FP8E4M3;
+        if (s == "fp8e5m2") return stablehlo::Precision::FP8E5M2;
+        if (s == "f16") return stablehlo::Precision::F16;
+        return stablehlo::Precision::DEFAULT;
+      };
+
+      auto lhsPrec = stablehlo::PrecisionAttr::get(rewriter.getContext(),
+                                                     parsePrecision(computePrec));
+      auto rhsPrec = stablehlo::PrecisionAttr::get(rewriter.getContext(),
+                                                     parsePrecision(computePrec));
+      auto accumPrecAttr = stablehlo::PrecisionAttr::get(rewriter.getContext(),
+                                                          parsePrecision(accumPrec));
+
+      precisionConfig = rewriter.getArrayAttr({lhsPrec, rhsPrec, accumPrecAttr});
+    }
+
     rewriter.replaceOpWithNewOp<stablehlo::DotGeneralOp>(
         op, op.getResult().getType(),
         adaptor.getLhs(), adaptor.getRhs(), dotDimNums,
-        /*precision_config=*/ArrayAttr());
+        precisionConfig);
 
     return success();
   }
@@ -865,6 +893,212 @@ struct ParallelOpLowering : public OpConversionPattern<ParallelOp> {
   }
 };
 
+// ── GeluOp ──────────────────────────────────────────────────────────────────
+
+struct GeluOpLowering : public OpConversionPattern<GeluOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GeluOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.gelu -> stablehlo.custom_call @gelu
+    // StableHLO doesn't have a native GELU, so we use custom_call
+    auto resultType = op.getResult().getType();
+    SmallVector<Type, 1> resultTypes = {resultType};
+
+    auto customCallOp = rewriter.create<stablehlo::CustomCallOp>(
+        op.getLoc(),
+        resultTypes,
+        ValueRange{adaptor.getInput()},
+        rewriter.getStringAttr("gelu"),
+        rewriter.getBoolAttr(false),
+        rewriter.getStringAttr(""),
+        /*api_version=*/nullptr,
+        /*called_computations=*/nullptr,
+        /*output_operand_aliases=*/nullptr);
+
+    rewriter.replaceOp(op, customCallOp.getResults());
+    return success();
+  }
+};
+
+// ── ExpOp ──────────────────────────────────────────────────────────────────
+
+struct ExpOpLowering : public OpConversionPattern<ExpOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ExpOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<stablehlo::ExpOp>(
+        op, adaptor.getInput());
+    return success();
+  }
+};
+
+// ── Conv2DOp ────────────────────────────────────────────────────────────────
+
+struct Conv2DOpLowering : public OpConversionPattern<Conv2DOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(Conv2DOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.conv2d -> stablehlo.convolution
+    auto inputType = adaptor.getInput().getType().dyn_cast<RankedTensorType>();
+    auto kernelType = adaptor.getKernel().getType().dyn_cast<RankedTensorType>();
+    if (!inputType || !kernelType) {
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor operands");
+    }
+
+    // Extract padding, strides, dilation from attributes
+    auto extractI64Array = [](ArrayAttr arr) -> SmallVector<int64_t, 4> {
+      SmallVector<int64_t, 4> result;
+      for (auto attr : arr) {
+        result.push_back(attr.cast<IntegerAttr>().getInt());
+      }
+      return result;
+    };
+
+    auto padding = extractI64Array(op.getPadding());
+    auto strides = extractI64Array(op.getStrides());
+    auto dilation = extractI64Array(op.getDilation());
+
+    // Build StableHLO convolution dimension numbers
+    // Input: [batch, in_channels, height, width] (NCHW)
+    // Kernel: [out_channels, in_channels, kH, kW] (OIHW)
+    auto dimNums = stablehlo::ConvDimensionNumbersAttr::get(
+        rewriter.getContext(),
+        /*input_batch_dimension=*/0,
+        /*input_feature_dimension=*/1,
+        /*input_spatial_dimensions=*/{2, 3},
+        /*kernel_output_feature_dimension=*/0,
+        /*kernel_input_feature_dimension=*/1,
+        /*kernel_spatial_dimensions=*/{2, 3},
+        /*output_batch_dimension=*/0,
+        /*output_feature_dimension=*/1,
+        /*output_spatial_dimensions=*/{2, 3});
+
+    // Create padding attribute (pairs of low/high padding)
+    SmallVector<int64_t, 8> paddingFlat;
+    for (size_t i = 0; i < padding.size(); i++) {
+      paddingFlat.push_back(padding[i]); // low
+      paddingFlat.push_back(padding[i]); // high (symmetric padding)
+    }
+    auto paddingAttr = DenseIntElementsAttr::get(
+        RankedTensorType::get({static_cast<int64_t>(paddingFlat.size() / 2), 2},
+                              rewriter.getI64Type()),
+        paddingFlat);
+
+    rewriter.replaceOpWithNewOp<stablehlo::ConvolutionOp>(
+        op, op.getResult().getType(),
+        adaptor.getInput(), adaptor.getKernel(),
+        dimNums,
+        /*window_strides=*/DenseIntElementsAttr::get(
+            RankedTensorType::get({static_cast<int64_t>(strides.size())},
+                                  rewriter.getI64Type()),
+            strides),
+        /*padding=*/paddingAttr,
+        /*lhs_dilation=*/DenseIntElementsAttr::get(
+            RankedTensorType::get({static_cast<int64_t>(dilation.size())},
+                                  rewriter.getI64Type()),
+            dilation),
+        /*rhs_dilation=*/DenseIntElementsAttr::get(
+            RankedTensorType::get({static_cast<int64_t>(dilation.size())},
+                                  rewriter.getI64Type()),
+            dilation),
+        /*window_reversal=*/DenseIntElementsAttr::get(
+            RankedTensorType::get({static_cast<int64_t>(strides.size())},
+                                  rewriter.getI1Type()),
+            SmallVector<bool, 4>(strides.size(), false)),
+        /*input_batch_dimension=*/0,
+        /*input_feature_dimension=*/1,
+        /*input_spatial_dimensions=*/{2, 3},
+        /*kernel_output_feature_dimension=*/0,
+        /*kernel_input_feature_dimension=*/1,
+        /*kernel_spatial_dimensions=*/{2, 3},
+        /*output_batch_dimension=*/0,
+        /*output_feature_dimension=*/1,
+        /*output_spatial_dimensions=*/{2, 3},
+        /*feature_group_count=*/1,
+        /*batch_group_count=*/1,
+        /*precision_config=*/ArrayAttr());
+    return success();
+  }
+};
+
+// ── AllReduceOp ────────────────────────────────────────────────────────────
+
+struct AllReduceOpLowering : public OpConversionPattern<AllReduceOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(AllReduceOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.all_reduce -> stablehlo.all_reduce
+    auto reduction = op.getReduction();
+
+    // Build the reduction region
+    auto resultType = op.getResult().getType();
+    auto elementType = resultType.dyn_cast<RankedTensorType>().getElementType();
+    auto scalarType = RankedTensorType::get({}, elementType);
+
+    auto allReduceOp = rewriter.create<stablehlo::AllReduceOp>(
+        op.getLoc(), TypeRange{resultType},
+        ValueRange{adaptor.getInput()},
+        /*channel_handle=*/nullptr,
+        /*use_global_device_ids=*/nullptr);
+
+    // Build the reducer region
+    auto &block = allReduceOp.getBody().emplaceBlock();
+    block.addArgument(scalarType, op.getLoc());
+    block.addArgument(scalarType, op.getLoc());
+
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(&block);
+
+    if (reduction == "sum") {
+      auto addOp = rewriter.create<stablehlo::AddOp>(
+          op.getLoc(), block.getArgument(0), block.getArgument(1));
+      rewriter.create<stablehlo::ReturnOp>(op.getLoc(), addOp.getResult());
+    } else if (reduction == "max") {
+      auto maxOp = rewriter.create<stablehlo::MaxOp>(
+          op.getLoc(), block.getArgument(0), block.getArgument(1));
+      rewriter.create<stablehlo::ReturnOp>(op.getLoc(), maxOp.getResult());
+    } else if (reduction == "min") {
+      auto minOp = rewriter.create<stablehlo::MinOp>(
+          op.getLoc(), block.getArgument(0), block.getArgument(1));
+      rewriter.create<stablehlo::ReturnOp>(op.getLoc(), minOp.getResult());
+    } else {
+      // Default: sum
+      auto addOp = rewriter.create<stablehlo::AddOp>(
+          op.getLoc(), block.getArgument(0), block.getArgument(1));
+      rewriter.create<stablehlo::ReturnOp>(op.getLoc(), addOp.getResult());
+    }
+
+    rewriter.replaceOp(op, allReduceOp.getResults());
+    return success();
+  }
+};
+
+// ── AllGatherOp ────────────────────────────────────────────────────────────
+
+struct AllGatherOpLowering : public OpConversionPattern<AllGatherOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(AllGatherOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // jules.all_gather -> stablehlo.all_gather
+    auto resultType = op.getResult().getType();
+
+    auto allGatherOp = rewriter.create<stablehlo::AllGatherOp>(
+        op.getLoc(), TypeRange{resultType},
+        ValueRange{adaptor.getInput()},
+        /*all_gather_dim=*/op.getGatherDim(),
+        /*channel_handle=*/nullptr,
+        /*use_global_device_ids=*/nullptr);
+
+    rewriter.replaceOp(op, allGatherOp.getResults());
+    return success();
+  }
+};
+
 // ── ExternKernelOp ─────────────────────────────────────────────────────────
 
 struct ExternKernelOpLowering : public OpConversionPattern<ExternKernelOp> {
@@ -932,6 +1166,8 @@ void jules::populateJulesToStableHLOPatterns(RewritePatternSet &patterns,
     ReluOpLowering,
     SigmoidOpLowering,
     TanhOpLowering,
+    GeluOpLowering,
+    ExpOpLowering,
     MeanOpLowering,
     SumOpLowering,
     ZerosOpLowering,
@@ -951,6 +1187,9 @@ void jules::populateJulesToStableHLOPatterns(RewritePatternSet &patterns,
     ReduceOpLowering,
     WhileOpLowering,
     ParallelOpLowering,
+    Conv2DOpLowering,
+    AllReduceOpLowering,
+    AllGatherOpLowering,
     ExternKernelOpLowering
   >(typeConverter, patterns.getContext());
 }

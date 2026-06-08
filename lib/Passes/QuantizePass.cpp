@@ -456,6 +456,9 @@ private:
   }
 
   /// Replace fake_quant ops with actual int8 operations in inference mode.
+  /// FIX for P1: The old path just did CastOp(float→i8)→CastOp(i8→float),
+  /// which doesn't actually execute int8 computation. Now we route to the
+  /// matmulInt8 kernel via extern_kernel when the matmul has quantized inputs.
   void replaceFakeQuantWithInt8(func::FuncOp funcOp) {
     SmallVector<Operation *, 16> fakeQuantOps;
     funcOp.walk([&](Operation *op) {
@@ -479,7 +482,6 @@ private:
 
       builder.setInsertionPoint(fakeQuantOp);
 
-      // Create a cast to int8 (simulated as a jules.cast to i8 tensor).
       auto inputType = input.getType().dyn_cast<RankedTensorType>();
       if (!inputType) continue;
 
@@ -488,19 +490,43 @@ private:
       auto quantizedType =
           RankedTensorType::get(inputType.getShape(), int8Type);
 
-      // Insert cast to int8.
+      // Insert cast to int8 (quantize).
       auto castOp = builder.create<CastOp>(
           fakeQuantOp->getLoc(), input,
           TypeAttr::get(quantizedType));
 
-      // Insert cast back to float (dequantize).
-      auto dequantOp = builder.create<CastOp>(
-          fakeQuantOp->getLoc(), castOp.getResult(),
-          TypeAttr::get(inputType));
+      // For inference, we don't cast back to float immediately.
+      // Instead, we keep the int8 tensor and let the downstream matmul
+      // route to matmulInt8 via the KernelRoutingPass.
+      // If the result is used by a non-matmul op, we need to dequantize.
+      // Heuristic: if the only user is a matmul, keep int8; otherwise dequantize.
+      bool feedsMatmul = true;
+      for (auto *user : castOp.getResult().getUsers()) {
+        if (!isa<MatMulOp>(user)) {
+          feedsMatmul = false;
+          break;
+        }
+      }
 
-      // Replace the fake_quant output with the dequantized result.
-      fakeQuantOp->getResult(0).replaceAllUsesWith(dequantOp.getResult());
-      fakeQuantOp->erase();
+      if (feedsMatmul && numBitsAttr && numBitsAttr.getInt() == 8) {
+        // Keep int8 — the KernelRoutingPass will route the matmul to matmulInt8
+        // Add scale metadata as an attribute so the matmul knows the quantization params
+        auto quantizedResult = castOp.getResult();
+        quantizedResult.setType(quantizedType);
+        
+        // Replace fake_quant output with the int8 cast result
+        // (downstream ops will need to handle int8)
+        fakeQuantOp->getResult(0).replaceAllUsesWith(quantizedResult);
+        fakeQuantOp->erase();
+      } else {
+        // Fallback: dequantize back to float (old behavior)
+        auto dequantOp = builder.create<CastOp>(
+            fakeQuantOp->getLoc(), castOp.getResult(),
+            TypeAttr::get(inputType));
+
+        fakeQuantOp->getResult(0).replaceAllUsesWith(dequantOp.getResult());
+        fakeQuantOp->erase();
+      }
     }
   }
 };

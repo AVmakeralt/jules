@@ -409,6 +409,17 @@ struct MixedPrecisionPass
       Type f32ResultType = getF32Type(originalResultType, ctx);
       matmulOp.getResult().setType(f32ResultType);
 
+      // FIX for P1 #9: Set matmul precision attributes so the StableHLO
+      // lowering can emit the correct precision_config on dot_general.
+      // Previously the pass just set the result type to f32 without
+      // telling the matmul op what precision it should use, causing
+      // incorrect lowering. Now we annotate the compute and accumulation
+      // precision explicitly.
+      matmulOp->setAttr("compute_precision",
+                        StringAttr::get(ctx, targetComputePrecision_));
+      matmulOp->setAttr("accumulation_precision",
+                        StringAttr::get(ctx, kAccumulationPrecision));
+
       // ── Upcast result back to original type ────────────────────────────
       builder.setInsertionPointAfter(matmulOp);
       auto resultUpcastOp = createCastOp(builder, loc,

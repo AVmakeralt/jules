@@ -337,93 +337,101 @@ struct MemoryPlanningPass
 
     // ── Phase 4: Memory Budget Computation ────────────────────────────────
     //
-    // Compute total memory requirement using interval coloring.
-    // At each instruction index, sum the buffer sizes of all live values.
-    // The maximum live memory is the total planned memory.
+    // Compute total memory requirement using a sweep-line algorithm.
+    // This replaces the old O(ops² × intervals) approach with O(N log N).
+    //
+    // Algorithm:
+    //   1. Create events for each interval: (start, +size) and (end, -size)
+    //   2. Sort events by instruction index
+    //   3. Sweep through events, maintaining a running sum of live memory
+    //   4. Track the maximum live memory (the peak)
 
-    // Group intervals by their live range and compute peak memory.
     int64_t peakMemory = 0;
 
-    // For each instruction index, compute total live memory.
-    // This is O(ops * intervals) but sufficient for our scale.
-    for (unsigned idx = 0; idx < index; ++idx) {
-      int64_t liveMemory = 0;
+    // Create sweep events
+    struct SweepEvent {
+      unsigned idx;      // Instruction index
+      int64_t delta;     // +size for start, -size for end
+      bool isStart;      // true = interval starts, false = interval ends
+    };
 
-      // Account for function arguments that are still live.
-      for (auto arg : funcOp.getArguments()) {
-        auto it = lastUseIndex.find(arg);
-        if (it != lastUseIndex.end() && idx <= it->second) {
-          // If any in-place op aliases this argument, its memory is reused.
-          bool reused = false;
-          for (auto *user : arg.getUsers()) {
-            if (inPlaceOps.count(user) && inPlaceAlias[user] == 0 &&
-                opIndex.count(user) && opIndex[user] <= idx) {
-              // The arg's buffer is reused — don't double-count.
-              // But we still need to count the output's memory once.
-              reused = true;
-              break;
-            }
-          }
-          if (!reused) {
-            liveMemory += estimateBufferSize(arg);
-          }
+    llvm::SmallVector<SweepEvent, 128> events;
+
+    // Function arguments: live from 0 to their last use
+    for (auto arg : funcOp.getArguments()) {
+      auto it = lastUseIndex.find(arg);
+      unsigned end = (it != lastUseIndex.end()) ? it->second : 0;
+      int64_t size = estimateBufferSize(arg);
+
+      // Skip args aliased by in-place ops (their buffer is reused)
+      bool reused = false;
+      for (auto *user : arg.getUsers()) {
+        if (inPlaceOps.count(user) && inPlaceAlias[user] == 0 &&
+            opIndex.count(user) && opIndex[user] <= end) {
+          reused = true;
+          break;
+        }
+      }
+      if (!reused && size > 0) {
+        events.push_back({0, size, true});
+        events.push_back({end + 1, -size, false});
+      }
+    }
+
+    // Operation results: live from their definition to their last use
+    for (auto *op : opsInOrder) {
+      for (auto result : op->getResults()) {
+        auto it = lastUseIndex.find(result);
+        unsigned start = opIndex[op];
+        unsigned end = (it != lastUseIndex.end()) ? it->second : start;
+
+        // Skip in-place results (their buffer is aliased)
+        if (inPlaceOps.count(op)) continue;
+
+        int64_t size = estimateBufferSize(result);
+        if (size > 0) {
+          events.push_back({start, size, true});
+          events.push_back({end + 1, -size, false});
         }
       }
 
-      // Account for operation results that are live at this point.
-      for (auto *op : opsInOrder) {
-        if (opIndex[op] > idx) break;
-
+      // Account for in-place results whose input was already freed
+      if (inPlaceOps.count(op)) {
         for (auto result : op->getResults()) {
           auto it = lastUseIndex.find(result);
-          unsigned endIdx = (it != lastUseIndex.end()) ? it->second : opIndex[op];
+          unsigned start = opIndex[op];
+          unsigned end = (it != lastUseIndex.end()) ? it->second : start;
 
-          if (idx >= opIndex[op] && idx <= endIdx) {
-            // If this result is computed in-place, its buffer is already
-            // accounted for by the input buffer — don't add extra memory.
-            if (inPlaceOps.count(op)) {
-              continue; // Memory already counted via the aliased input.
+          unsigned aliasIdx = inPlaceAlias[op];
+          Value aliasedInput = op->getOperand(aliasIdx);
+          auto inputIt = lastUseIndex.find(aliasedInput);
+          unsigned inputEnd = (inputIt != lastUseIndex.end()) ? inputIt->second : 0;
+
+          // If the input was already freed, the output takes over the buffer
+          if (inputEnd < start) {
+            int64_t size = estimateBufferSize(result);
+            if (size > 0) {
+              events.push_back({start, size, true});
+              events.push_back({end + 1, -size, false});
             }
-            liveMemory += estimateBufferSize(result);
           }
         }
       }
+    }
 
-      // Also account for in-place results that need to be counted if
-      // their input is a function argument (already handled above) or
-      // an op result that has already ended.
-      for (auto *op : opsInOrder) {
-        if (opIndex[op] > idx) break;
-        if (!inPlaceOps.count(op)) continue;
+    // Sort events: process ends before starts at the same index
+    // (a buffer ending at index i can be reused by one starting at i)
+    std::sort(events.begin(), events.end(), [](const SweepEvent &a, const SweepEvent &b) {
+      if (a.idx != b.idx) return a.idx < b.idx;
+      // End events before start events at same index (free before allocate)
+      return !a.isStart && b.isStart;
+    });
 
-        // The in-place op reuses its input buffer. The input buffer
-        // may have been freed already (its liveness ended before this op).
-        // In that case, the buffer is now owned by the output. We need
-        // to count it if the output is still live.
-        for (auto result : op->getResults()) {
-          auto it = lastUseIndex.find(result);
-          unsigned endIdx = (it != lastUseIndex.end()) ? it->second : opIndex[op];
-
-          if (idx >= opIndex[op] && idx <= endIdx) {
-            // The input buffer's liveness ended at this op.
-            // The output takes over the buffer, so we count its size.
-            unsigned aliasIdx = inPlaceAlias[op];
-            Value aliasedInput = op->getOperand(aliasIdx);
-            auto inputIt = lastUseIndex.find(aliasedInput);
-            unsigned inputEnd = (inputIt != lastUseIndex.end())
-                                    ? inputIt->second : 0;
-
-            if (inputEnd < opIndex[op]) {
-              // Input was already freed — the output buffer is new.
-              liveMemory += estimateBufferSize(result);
-            }
-            // If inputEnd >= opIndex[op], the buffer is still live from
-            // the input's perspective and was already counted above.
-          }
-        }
-      }
-
-      peakMemory = std::max(peakMemory, liveMemory);
+    // Sweep through events
+    int64_t currentLive = 0;
+    for (auto &event : events) {
+      currentLive += event.delta;
+      peakMemory = std::max(peakMemory, currentLive);
     }
 
     // Account for function argument buffers (always allocated).

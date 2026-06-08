@@ -147,8 +147,16 @@ def MatMulOp : JulesOp<"matmul", [Pure]> {
       [M, K] ** [K, N] -> [M, N]
       [B, M, K] ** [K, N] -> [B, M, N]
       [B, M, K] ** [B, K, N] -> [B, M, N]
+
+    Attributes:
+      compute_precision: The precision used for the matmul computation
+        (e.g., "bf16", "fp8", "f32"). Defaults to the input precision.
+      accumulation_precision: The precision used for accumulation.
+        Always "f32" for correctness when inputs are lower precision.
   }];
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs,
+                       OptionalAttr<StrAttr>:$compute_precision,
+                       OptionalAttr<StrAttr>:$accumulation_precision);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
@@ -181,6 +189,27 @@ def TanhOp : JulesOp<"tanh", [Pure, SameOperandsAndResultType]> {
   let summary = "Tanh activation";
   let description = [{
     Computes the hyperbolic tangent activation.
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input attr-dict `:` type($result)";
+}
+
+def GeluOp : JulesOp<"gelu", [Pure, SameOperandsAndResultType]> {
+  let summary = "GELU activation";
+  let description = [{
+    Computes the Gaussian Error Linear Unit activation:
+    GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input attr-dict `:` type($result)";
+}
+
+def ExpOp : JulesOp<"exp", [Pure, SameOperandsAndResultType]> {
+  let summary = "Element-wise exponential";
+  let description = [{
+    Computes the element-wise exponential function: exp(x).
   }];
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
@@ -518,6 +547,60 @@ def ExternKernelOp : JulesOp<"extern_kernel", [Pure]> {
   let assemblyFormat = [{
     $kernel_name `(` $inputs `:` type($inputs) `)` attr-dict `:` type($results)
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// Convolution
+//===----------------------------------------------------------------------===//
+
+def Conv2DOp : JulesOp<"conv2d", [Pure]> {
+  let summary = "2D convolution";
+  let description = [{
+    Computes a 2D convolution over an input tensor with a kernel tensor.
+    Supports standard convolution with padding, stride, and dilation.
+      Input:  [batch, in_channels, height, width]
+      Kernel: [out_channels, in_channels, kH, kW]
+      Output: [batch, out_channels, outH, outW]
+  }];
+  let arguments = (ins AnyType:$input, AnyType:$kernel,
+                       I64ArrayAttr:$padding,
+                       I64ArrayAttr:$strides,
+                       I64ArrayAttr:$dilation);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $input `,` $kernel `padding` $padding `strides` $strides `dilation` $dilation
+    attr-dict `:` type($input) `,` type($kernel) `->` type($result)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Distributed collective operations
+//===----------------------------------------------------------------------===//
+
+def AllReduceOp : JulesOp<"all_reduce", [Pure]> {
+  let summary = "All-reduce collective operation";
+  let description = [{
+    Performs an all-reduce operation across all devices in a device group.
+    Combines values from all devices using the specified reduction operation
+    (sum, max, min, prod) and returns the result to all devices.
+    This is the fundamental primitive for distributed training (e.g.,
+    gradient synchronization in data-parallel SGD).
+  }];
+  let arguments = (ins AnyType:$input, StrAttr:$reduction);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input `,` $reduction attr-dict `:` type($input) `->` type($result)";
+}
+
+def AllGatherOp : JulesOp<"all_gather", [Pure]> {
+  let summary = "All-gather collective operation";
+  let description = [{
+    Gathers values from all devices along a specified dimension and
+    returns the concatenated result to all devices. Used for tensor
+    parallelism where each device holds a shard of a tensor.
+  }];
+  let arguments = (ins AnyType:$input, I64Attr:$gather_dim);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input `,` $gather_dim attr-dict `:` type($input) `->` type($result)";
 }
 
 #endif // JULES_OPS

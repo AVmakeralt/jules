@@ -142,6 +142,14 @@ std::unique_ptr<mlir::Pass> createQuantizePass(
     unsigned numBits,
     bool perChannel);
 
+// ── Kernel Routing ──────────────────────────────────────────────────────────
+
+/// Create the Kernel Routing pass.
+/// Recognizes operation patterns (matmul+relu, softmax, layernorm, etc.)
+/// and routes them to fused kernel implementations via extern_kernel ops.
+/// This is THE bridge between the kernel layer and the MLIR compiler.
+std::unique_ptr<mlir::Pass> createKernelRoutingPass();
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /// Register all Jules passes with the MLIR pass pipeline.

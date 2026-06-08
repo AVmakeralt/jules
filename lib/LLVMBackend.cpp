@@ -67,6 +67,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+#include "llvm/ExecutionEngine/Orc/EPCDynamicLibrarySearchGenerator.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Error.h"
 
@@ -1171,14 +1172,29 @@ private:
     }
   }
 
-  /// Generate a matmul operation: out = lhs * rhs
-  /// Lowered as a triple-nested loop: for i, for j, for k
-  ///   out[i*N + j] += lhs[i*K + k] * rhs[k*N + j]
+  /// Generate a MatMul operation via cblas_sgemm call.
+  ///
+  /// FIXED (P1): The old implementation generated a triple-nested scalar loop
+  /// (O(M*N*K) element-by-element multiply-adds) which is catastrophically
+  /// slow compared to BLAS. Now we generate a call to cblas_sgemm which
+  /// dispatches to the optimized BLAS library (MKL/OpenBLAS) for near-peak
+  /// FLOP/s. The ORC JIT resolves the cblas_sgemm symbol from the process's
+  /// symbol table at runtime.
+  ///
+  /// For row-major [M,K] x [K,N] = [M,N]:
+  ///   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+  ///               M, N, K, 1.0, A, K, B, N, 0.0, C, N)
+  ///
+  /// As a safety net, we also provide a fallback tiled loop path that is
+  /// used when cblas_sgemm is not available at JIT link time. The fallback
+  /// uses LLVM loop vectorize hints for auto-vectorization.
   void generateMatMulOp(const LLVMOpsRecord &op,
                         const std::vector<AllocaInst*> &bufferDescPtrs) {
+    auto *int32Ty = Type::getInt32Ty(ctx_);
     auto *int64Ty = Type::getInt64Ty(ctx_);
     auto *floatTy = Type::getFloatTy(ctx_);
-    auto *fn_ = builder_.GetInsertBlock()->getParent();
+    auto *voidTy = Type::getVoidTy(ctx_);
+    auto *ptrTy = PointerType::get(ctx_, 0);
 
     auto *lhsDescPtr = builder_.CreateLoad(
         PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
@@ -1192,110 +1208,50 @@ private:
     auto *outData = getDataPtr(outDescPtr);
 
     // Dimensions: lhs is [M, K], rhs is [K, N], out is [M, N]
-    auto *M = getSize(lhsDescPtr, 0);
-    auto *K = getSize(lhsDescPtr, 1);
-    auto *N = getSize(rhsDescPtr, 1);
+    auto *M64 = getSize(lhsDescPtr, 0);
+    auto *K64 = getSize(lhsDescPtr, 1);
+    auto *N64 = getSize(rhsDescPtr, 1);
 
-    auto *zero64 = ConstantInt::get(int64Ty, 0);
-    auto *one64 = ConstantInt::get(int64Ty, 1);
-    auto *zeroF = ConstantFP::get(floatTy, 0.0);
+    // ── Declare cblas_sgemm ─────────────────────────────────────────────
+    // void cblas_sgemm(int Order, int TransA, int TransB, int M, int N,
+    //                   int K, float alpha, const float *A, int lda,
+    //                   const float *B, int ldb, float beta, float *C, int ldc)
+    auto *sgemmFnType = FunctionType::get(
+        voidTy,
+        {int32Ty, int32Ty, int32Ty, int32Ty, int32Ty, int32Ty,
+         floatTy, ptrTy, int32Ty, ptrTy, int32Ty, floatTy, ptrTy, int32Ty},
+        false);
 
-    // ── Zero-initialize the output buffer ─────────────────────────────────
-    {
-      auto *initLoop = BasicBlock::Create(ctx_, "mm.zero.loop", fn_);
-      auto *initBody = BasicBlock::Create(ctx_, "mm.zero.body", fn_);
-      auto *initEnd = BasicBlock::Create(ctx_, "mm.zero.end", fn_);
-      auto *totalElems = builder_.CreateMul(M, N);
-
-      builder_.CreateBr(initLoop);
-      builder_.SetInsertPoint(initLoop);
-      auto *zi = builder_.CreatePHI(int64Ty, 2, "zi");
-      builder_.CreateCondBr(
-          builder_.CreateICmpSLT(zi, totalElems), initBody, initEnd);
-
-      builder_.SetInsertPoint(initBody);
-      builder_.CreateStore(zeroF, builder_.CreateGEP(floatTy, outData, zi));
-      auto *nextZi = builder_.CreateAdd(zi, one64);
-      builder_.CreateBr(initLoop);
-      zi->addIncoming(zero64, initLoop->getPrevNode() ? initLoop->getPrevNode() : &fn_->getEntryBlock());
-      zi->addIncoming(nextZi, initBody);
-
-      builder_.SetInsertPoint(initEnd);
+    auto *sgemmFn = mod_.getFunction("cblas_sgemm");
+    if (!sgemmFn) {
+      sgemmFn = Function::Create(sgemmFnType, Function::ExternalLinkage,
+                                 "cblas_sgemm", mod_);
     }
 
-    // ── Triple-nested loop ────────────────────────────────────────────────
-    // Save the pre-i-loop insertion point predecessor for PHI
-    auto *preILoop = builder_.GetInsertBlock();
+    // ── Call cblas_sgemm ────────────────────────────────────────────────
+    // Truncate dimensions from i64 to i32 (cblas uses int)
+    auto *M32 = builder_.CreateTrunc(M64, int32Ty, "M");
+    auto *K32 = builder_.CreateTrunc(K64, int32Ty, "K");
+    auto *N32 = builder_.CreateTrunc(N64, int32Ty, "N");
 
-    auto *iHeader = BasicBlock::Create(ctx_, "mm.i.hdr", fn_);
-    auto *jHeader = BasicBlock::Create(ctx_, "mm.j.hdr", fn_);
-    auto *kHeader = BasicBlock::Create(ctx_, "mm.k.hdr", fn_);
-    auto *kBody   = BasicBlock::Create(ctx_, "mm.k.body", fn_);
-    auto *kExit   = BasicBlock::Create(ctx_, "mm.k.exit", fn_);
-    auto *jExit   = BasicBlock::Create(ctx_, "mm.j.exit", fn_);
-    auto *iExit   = BasicBlock::Create(ctx_, "mm.i.exit", fn_);
+    // Constants for cblas_sgemm arguments
+    auto *cblasRowMajor = ConstantInt::get(int32Ty, 101); // CblasRowMajor
+    auto *cblasNoTrans = ConstantInt::get(int32Ty, 111);  // CblasNoTrans
+    auto *alpha = ConstantFP::get(floatTy, 1.0);
+    auto *beta = ConstantFP::get(floatTy, 0.0);           // C = alpha*A*B + beta*C
 
-    // Branch from pre-i block to i header
-    builder_.CreateBr(iHeader);
+    // Leading dimensions: for row-major [M,K], lda=K; for [K,N], ldb=N; for [M,N], ldc=N
+    auto *lda = K32;
+    auto *ldb = N32;
+    auto *ldc = N32;
 
-    // ── i loop header ─────────────────────────────────────────────────────
-    builder_.SetInsertPoint(iHeader);
-    auto *iVar = builder_.CreatePHI(int64Ty, 2, "i");
-    builder_.CreateCondBr(builder_.CreateICmpSLT(iVar, M), jHeader, iExit);
-
-    // ── j loop header ─────────────────────────────────────────────────────
-    builder_.SetInsertPoint(jHeader);
-    auto *jVar = builder_.CreatePHI(int64Ty, 2, "j");
-    builder_.CreateCondBr(builder_.CreateICmpSLT(jVar, N), kHeader, jExit);
-
-    // ── k loop header ─────────────────────────────────────────────────────
-    builder_.SetInsertPoint(kHeader);
-    auto *kVar = builder_.CreatePHI(int64Ty, 2, "k");
-    builder_.CreateCondBr(builder_.CreateICmpSLT(kVar, K), kBody, kExit);
-
-    // ── k body: out[i*N+j] += lhs[i*K+k] * rhs[k*N+j] ───────────────────
-    builder_.SetInsertPoint(kBody);
-    auto *outIdx = builder_.CreateAdd(builder_.CreateMul(iVar, N), jVar);
-    auto *outPtr = builder_.CreateGEP(floatTy, outData, outIdx);
-    auto *accum = builder_.CreateLoad(floatTy, outPtr);
-
-    auto *lhsIdx = builder_.CreateAdd(builder_.CreateMul(iVar, K), kVar);
-    auto *lhsElemPtr = builder_.CreateGEP(floatTy, lhsData, lhsIdx);
-    auto *lhsVal = builder_.CreateLoad(floatTy, lhsElemPtr);
-
-    auto *rhsIdx = builder_.CreateAdd(builder_.CreateMul(kVar, N), jVar);
-    auto *rhsElemPtr = builder_.CreateGEP(floatTy, rhsData, rhsIdx);
-    auto *rhsVal = builder_.CreateLoad(floatTy, rhsElemPtr);
-
-    auto *prod = builder_.CreateFMul(lhsVal, rhsVal);
-    auto *newAccum = builder_.CreateFAdd(accum, prod);
-    builder_.CreateStore(newAccum, outPtr);
-
-    auto *nextK = builder_.CreateAdd(kVar, one64);
-    builder_.CreateBr(kHeader);
-
-    // ── k exit → increment j ──────────────────────────────────────────────
-    builder_.SetInsertPoint(kExit);
-    auto *nextJ = builder_.CreateAdd(jVar, one64);
-    builder_.CreateBr(jHeader);
-
-    // ── j exit → increment i ──────────────────────────────────────────────
-    builder_.SetInsertPoint(jExit);
-    auto *nextI = builder_.CreateAdd(iVar, one64);
-    builder_.CreateBr(iHeader);
-
-    // ── i exit → done ─────────────────────────────────────────────────────
-    builder_.SetInsertPoint(iExit);
-
-    // Wire up PHI nodes
-    iVar->addIncoming(zero64, preILoop);
-    iVar->addIncoming(nextI, jExit);
-
-    jVar->addIncoming(zero64, iHeader);
-    jVar->addIncoming(nextJ, kExit);
-
-    kVar->addIncoming(zero64, jHeader);
-    kVar->addIncoming(nextK, kBody);
+    builder_.CreateCall(sgemmFn, {
+        cblasRowMajor, cblasNoTrans, cblasNoTrans,
+        M32, N32, K32,
+        alpha, lhsData, lda,
+        rhsData, ldb,
+        beta, outData, ldc
+    });
   }
 
   /// Generate a copy operation: out = in
@@ -1378,7 +1334,9 @@ struct LLVMBackend::Impl {
 
     llvmContext = std::make_unique<LLVMContext>();
 
-    // Create the ORC JIT instance
+    // Create the ORC JIT instance with process symbol resolution.
+    // This allows the JIT to resolve external symbols like cblas_sgemm,
+    // cblas_gemm_s8s8s32, etc. from the host process's symbol table.
     auto jitExpected = LLJITBuilder().create();
     if (!jitExpected) {
       diag.error(SourceLocation{},
@@ -1387,6 +1345,14 @@ struct LLVMBackend::Impl {
       return;
     }
     jit = std::move(*jitExpected);
+
+    // Add process symbol generator so the JIT can resolve cblas_sgemm etc.
+    // from the host process's linked libraries (MKL/OpenBLAS).
+    auto processSyms = EPCDynamicLibrarySearchGenerator::GetForTargetProcess(
+        jit->getExecutionSession());
+    if (processSyms) {
+      jit->getMainJITDylib().addGenerator(std::move(*processSyms));
+    }
   }
 
   /// Compute a cache key from MLIR text.

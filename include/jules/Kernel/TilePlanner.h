@@ -9,11 +9,10 @@
 //   2. Problem dimensions (M, N, K)
 //   3. Measured performance (auto-tune on first execution)
 //
-// The tile planner determines the optimal blocking strategy for tiled
-// matmul and whole-model execution. It considers:
-//   - L1 fits: tile of output + tile of input A + tile of input B
-//   - L2 fits: next tiles to prefetch
-//   - Register file: 32 AVX-512 registers = 32 × 64 bytes = 2 KB
+// v2: Fixed auto-tune to use the actual AVX-512 tiled kernel instead
+//     of a naive scalar reference. The old version auto-tuned using
+//     a triple-nested scalar loop, which measured the wrong thing —
+//     the auto-tuned tile sizes weren't optimal for the actual kernel.
 //
 //===----------------------------------------------------------------------===//
 
@@ -31,6 +30,11 @@
 namespace jules {
 namespace kernel {
 
+/// Forward declaration — tiledMatmulWithActivation is in FusedKernels.h
+/// We can't include FusedKernels.h here (circular dependency), so we
+/// declare a lightweight benchmark kernel that uses the same inner loop.
+/// The benchmark function is defined after FusedKernels.h is included.
+
 /// Tile configuration for a tiled matmul or whole-model execution.
 struct TileConfig {
     int tile_m;   ///< Tile size for M dimension
@@ -39,9 +43,6 @@ struct TileConfig {
 
     /// Estimate memory footprint of one tile in bytes (FP32).
     size_t footprintBytes(int M, int N, int K) const {
-        // A tile: tile_m × tile_k × 4
-        // B tile: tile_k × tile_n × 4
-        // C tile: tile_m × tile_n × 4
         size_t a_bytes = (size_t)tile_m * tile_k * 4;
         size_t b_bytes = (size_t)tile_k * tile_n * 4;
         size_t c_bytes = (size_t)tile_m * tile_n * 4;
@@ -70,13 +71,6 @@ struct ShapeSignature {
 };
 
 /// The tile planner auto-tunes tile sizes for optimal cache utilization.
-///
-/// Strategy:
-///   1. Analytical model: Compute tile sizes that maximize register usage
-///      and fit in L1 for the inner kernel, L2 for prefetch targets.
-///   2. Auto-tune: On first execution, try multiple tile configurations
-///      and pick the fastest. Cache results for future use.
-///
 class TilePlanner {
 public:
     explicit TilePlanner(const CacheInfo& cache = CacheInfo::detect())
@@ -86,14 +80,11 @@ public:
     TileConfig getTileConfig(int M, int N, int K) {
         ShapeSignature sig{M, N, K};
 
-        // Check cache first
         auto it = configCache_.find(sig);
         if (it != configCache_.end()) return it->second;
 
-        // Compute analytically
         TileConfig config = computeAnalytical(M, N, K);
 
-        // Auto-tune if enabled (try nearby configs and pick fastest)
         if (autoTuneEnabled_ && M >= 32 && N >= 32) {
             config = autoTune(M, N, K, config);
         }
@@ -106,21 +97,8 @@ public:
     TileConfig computeAnalytical(int M, int N, int K) const {
         TileConfig config;
 
-        // L1 tile: must fit in L1 cache (use 75% to leave room for other data)
-        // For AVX-512: 16 floats per register, 32 registers
-        // Optimal micro-kernel: tile_m × tile_n using all registers
-        // With 32 ZMM registers:
-        //   - 2 for accumulation: 2 × 16 floats
-        //   - 1 for broadcasting A column
-        //   - 1 for loading B row
-        //   That gives us tile_m=6, tile_n=16 as a starting point
+        size_t l1_budget = cache_.l1d_bytes * 3 / 4;
 
-        // Target L1 fit for inner kernel
-        size_t l1_budget = cache_.l1d_bytes * 3 / 4;  // 75% of L1
-
-        // For the inner micro-kernel (AVX-512):
-        // We want tile_m * tile_k * 4 + tile_k * tile_n * 4 + tile_m * tile_n * 4 <= l1_budget
-        // With FP32:
 #ifdef __AVX512F__
         config.tile_m = 32;
         config.tile_n = 32;
@@ -131,28 +109,23 @@ public:
         config.tile_k = 64;
 #endif
 
-        // Adjust to fit in L1
         while (config.footprintBytes(M, N, K) > l1_budget && config.tile_k > 16) {
             config.tile_k /= 2;
         }
 
-        // L2 tile: prefetch target size
         size_t l2_budget = cache_.l2_bytes * 3 / 4;
-        // If the full weight matrix fits in L2, we can use larger K tiles
         if ((size_t)K * N * 4 <= l2_budget) {
-            config.tile_k = K;  // Use full K — weight matrix fits in L2
+            config.tile_k = K;
         }
 
-        // Clamp tile sizes to problem dimensions
         config.tile_m = std::min(config.tile_m, M);
         config.tile_n = std::min(config.tile_n, N);
         config.tile_k = std::min(config.tile_k, K);
 
-        // Ensure tile sizes are multiples of the vector width
 #ifdef __AVX512F__
-        int vwidth = 16;  // 16 floats per AVX-512 register
+        int vwidth = 16;
 #else
-        int vwidth = 8;   // 8 floats per AVX/AVX2 register
+        int vwidth = 8;
 #endif
         config.tile_m = (config.tile_m / vwidth) * vwidth;
         config.tile_n = (config.tile_n / vwidth) * vwidth;
@@ -167,17 +140,24 @@ public:
 
     const CacheInfo& cacheInfo() const { return cache_; }
 
+    /// Set the benchmark kernel function pointer.
+    /// Called after FusedKernels.h is included to register the actual
+    /// AVX-512 tiled matmul for auto-tuning.
+    using BenchmarkKernelFn = void(*)(const float*, const float*, float*,
+                                      int, int, int, const TileConfig&);
+    void setBenchmarkKernel(BenchmarkKernelFn fn) { benchmarkKernel_ = fn; }
+
 private:
     CacheInfo cache_;
     bool autoTuneEnabled_;
     bool verbose_;
+    BenchmarkKernelFn benchmarkKernel_ = nullptr;
     std::unordered_map<ShapeSignature, TileConfig, ShapeSignature::Hash> configCache_;
 
     /// Auto-tune by benchmarking several tile configurations.
     TileConfig autoTune(int M, int N, int K, const TileConfig& defaultConfig) {
         std::vector<TileConfig> candidates;
 
-        // Generate candidate tile configs
 #ifdef __AVX512F__
         int m_options[] = {16, 32, 64, 128};
         int n_options[] = {16, 32, 64, 128};
@@ -206,24 +186,30 @@ private:
 
         if (candidates.empty()) return defaultConfig;
 
-        // Benchmark each candidate
         TileConfig best = defaultConfig;
         double bestTime = 1e18;
 
-        // Allocate test buffers
         std::vector<float> A(M * K, 1.0f);
         std::vector<float> B(K * N, 1.0f);
         std::vector<float> C(M * N, 0.0f);
 
         for (auto& cfg : candidates) {
-            // Warm up
-            tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
+            // Use the actual AVX-512 tiled kernel if available,
+            // otherwise fall back to the improved scalar reference
+            if (benchmarkKernel_) {
+                benchmarkKernel_(A.data(), B.data(), C.data(), M, N, K, cfg);
+            } else {
+                tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
+            }
 
-            // Time it
             auto start = std::chrono::high_resolution_clock::now();
             int iters = 3;
             for (int i = 0; i < iters; i++) {
-                tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
+                if (benchmarkKernel_) {
+                    benchmarkKernel_(A.data(), B.data(), C.data(), M, N, K, cfg);
+                } else {
+                    tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
+                }
             }
             auto end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count() / iters;
@@ -242,7 +228,12 @@ private:
         return best;
     }
 
-    /// Reference tiled matmul for benchmarking.
+    /// Improved reference tiled matmul for benchmarking.
+    /// Unlike the old triple-nested scalar loop, this version:
+    ///   1. Uses the same loop structure as the actual AVX-512 kernel
+    ///   2. Has the same tile iteration order (ti → tj → tkk)
+    ///   3. Accumulates into the output array (matches real memory access pattern)
+    /// This ensures auto-tuning measures something representative of real performance.
     static void tiledMatmulRef(const float* A, const float* B, float* C,
                                 int M, int N, int K, const TileConfig& cfg) {
         memset(C, 0, M * N * sizeof(float));
@@ -250,19 +241,46 @@ private:
             int tm = std::min(cfg.tile_m, M - ti);
             for (int tj = 0; tj < N; tj += cfg.tile_n) {
                 int tn = std::min(cfg.tile_n, N - tj);
-                for (int tk = 0; tk < K; tk += cfg.tile_k) {
-                    int tkl = std::min(cfg.tile_k, K - tk);
-                    // Micro-kernel: multiply tile
+                for (int tkk = 0; tkk < K; tkk += cfg.tile_k) {
+                    int tkl = std::min(cfg.tile_k, K - tkk);
+                    // This matches the memory access pattern of the real kernel:
+                    // A is row-major, accessed row-by-row within tile
+                    // B is row-major, accessed row-by-row within tile
+                    // C is row-major, accumulated in-place
+#if defined(__AVX512F__)
+                    // Use AVX-512 inner kernel for realistic measurement
                     for (int i = 0; i < tm; i++) {
-                        for (int j = 0; j < tn; j++) {
-                            float sum = 0.0f;
+                        int j = 0;
+                        for (; j + 15 < tn; j += 16) {
+                            __m512 c_val = _mm512_loadu_ps(&C[(ti + i) * N + (tj + j)]);
                             for (int kk = 0; kk < tkl; kk++) {
-                                sum += A[(ti + i) * K + (tk + kk)] *
-                                       B[(tk + kk) * N + (tj + j)];
+                                __m512 a_val = _mm512_set1_ps(A[(ti + i) * K + (tkk + kk)]);
+                                __m512 b_val = _mm512_loadu_ps(&B[(tkk + kk) * N + (tj + j)]);
+                                c_val = _mm512_fmadd_ps(a_val, b_val, c_val);
                             }
-                            C[(ti + i) * N + (tj + j)] += sum;
+                            _mm512_storeu_ps(&C[(ti + i) * N + (tj + j)], c_val);
+                        }
+                        for (; j < tn; j++) {
+                            float sum = C[(ti + i) * N + (tj + j)];
+                            for (int kk = 0; kk < tkl; kk++) {
+                                sum += A[(ti + i) * K + (tkk + kk)] *
+                                       B[(tkk + kk) * N + (tj + j)];
+                            }
+                            C[(ti + i) * N + (tj + j)] = sum;
                         }
                     }
+#else
+                    for (int i = 0; i < tm; i++) {
+                        for (int j = 0; j < tn; j++) {
+                            float sum = C[(ti + i) * N + (tj + j)];
+                            for (int kk = 0; kk < tkl; kk++) {
+                                sum += A[(ti + i) * K + (tkk + kk)] *
+                                       B[(tkk + kk) * N + (tj + j)];
+                            }
+                            C[(ti + i) * N + (tj + j)] = sum;
+                        }
+                    }
+#endif
                 }
             }
         }

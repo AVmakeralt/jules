@@ -45,9 +45,16 @@ namespace {
 /// Represents a symbolic dimension variable (e.g., "Batch", "Features", "I").
 /// Multiple tensor dimensions can share the same symbolic name, indicating
 /// they must be equal at runtime.
+///
+/// NOTE: We use StringAttr instead of StringRef for dimension names that
+/// will be stored in IR attributes. StringAttr has stable storage in the
+/// MLIRContext, so it won't dangle if the pass object is destroyed while
+/// the attributes are still referenced by the IR. This fixes the P1 #10
+/// dangling StringRef bug.
 struct SymbolicDim {
   /// The name of the symbolic dimension (e.g., "Batch", "SeqLen").
-  llvm::StringRef name;
+  /// Using StringAttr for stable storage in the MLIRContext.
+  StringAttr name;
 
   /// The argument index and dimension index where this symbol originates.
   unsigned argIndex;
@@ -57,22 +64,22 @@ struct SymbolicDim {
   bool isDynamic;
 
   SymbolicDim() : argIndex(0), dimIndex(0), isDynamic(false) {}
-  SymbolicDim(llvm::StringRef name, unsigned argIdx, unsigned dimIdx,
+  SymbolicDim(StringAttr name, unsigned argIdx, unsigned dimIdx,
               bool dynamic)
       : name(name), argIndex(argIdx), dimIndex(dimIdx), isDynamic(dynamic) {}
 
   bool operator==(const SymbolicDim &other) const { return name == other.name; }
-  bool operator<(const SymbolicDim &other) const { return name < other.name; }
+  bool operator<(const SymbolicDim &other) const { return name.getValue() < other.name.getValue(); }
 };
 
 /// Hash support for SymbolicDim.
 struct SymbolicDimInfo : llvm::DenseMapInfo<SymbolicDim> {
   static inline SymbolicDim getEmptyKey() {
-    return SymbolicDim(llvm::DenseMapInfo<StringRef>::getEmptyKey(),
+    return SymbolicDim(StringAttr::get(nullptr, llvm::DenseMapInfo<StringRef>::getEmptyKey()),
                        0, 0, false);
   }
   static inline SymbolicDim getTombstoneKey() {
-    return SymbolicDim(llvm::DenseMapInfo<StringRef>::getTombstoneKey(),
+    return SymbolicDim(StringAttr::get(nullptr, llvm::DenseMapInfo<StringRef>::getTombstoneKey()),
                        0, 0, false);
   }
   static unsigned getHashValue(const SymbolicDim &val) {
@@ -88,27 +95,27 @@ struct SymbolicDimInfo : llvm::DenseMapInfo<SymbolicDim> {
 /// Represents a set of constraints on symbolic dimensions.
 /// Tracks which dimensions must be equal (via union-find) and which
 /// dimensions have known bounds.
+/// NOTE: Uses StringAttr for stable storage (fixes P1 #10 dangling ref bug).
 struct ShapeConstraint {
   /// Union-Find for dimension equality: maps dimension name → representative.
-  llvm::DenseMap<llvm::StringRef, llvm::StringRef> equalityClass;
+  llvm::DenseMap<StringAttr, StringAttr> equalityClass;
 
   /// Known lower bounds for dimensions (e.g., Batch >= 1).
-  llvm::DenseMap<llvm::StringRef, int64_t> lowerBounds;
+  llvm::DenseMap<StringAttr, int64_t> lowerBounds;
 
   /// Known upper bounds for dimensions.
-  llvm::DenseMap<llvm::StringRef, int64_t> upperBounds;
+  llvm::DenseMap<StringAttr, int64_t> upperBounds;
 
   /// All unique symbolic dimension names encountered.
-  llvm::SmallVector<llvm::StringRef, 8> allDimNames;
+  llvm::SmallVector<StringAttr, 8> allDimNames;
 
   /// Add an equality constraint between two symbolic dimensions.
-  void addEquality(llvm::StringRef dimA, llvm::StringRef dimB) {
-    // Union-Find with path compression.
-    llvm::StringRef rootA = findRoot(dimA);
-    llvm::StringRef rootB = findRoot(dimB);
+  void addEquality(StringAttr dimA, StringAttr dimB) {
+    StringAttr rootA = findRoot(dimA);
+    StringAttr rootB = findRoot(dimB);
     if (rootA != rootB) {
       // Merge: make the lexicographically smaller name the root.
-      if (rootA < rootB) {
+      if (rootA.getValue() < rootB.getValue()) {
         equalityClass[rootB] = rootA;
       } else {
         equalityClass[rootA] = rootB;
@@ -117,7 +124,7 @@ struct ShapeConstraint {
   }
 
   /// Find the root representative of a dimension name.
-  llvm::StringRef findRoot(llvm::StringRef dim) {
+  StringAttr findRoot(StringAttr dim) {
     auto it = equalityClass.find(dim);
     if (it == equalityClass.end()) {
       equalityClass[dim] = dim;
@@ -125,31 +132,30 @@ struct ShapeConstraint {
     }
     if (it->second == dim) return dim;
     // Path compression.
-    llvm::StringRef root = findRoot(it->second);
+    StringAttr root = findRoot(it->second);
     equalityClass[dim] = root;
     return root;
   }
 
   /// Check if two dimensions are in the same equality class.
-  bool areEqual(llvm::StringRef dimA, llvm::StringRef dimB) {
+  bool areEqual(StringAttr dimA, StringAttr dimB) {
     return findRoot(dimA) == findRoot(dimB);
   }
 
   /// Record a symbolic dimension name if not already seen.
-  void recordDim(llvm::StringRef name) {
+  void recordDim(StringAttr name) {
     for (auto existing : allDimNames) {
       if (existing == name) return;
     }
     allDimNames.push_back(name);
-    // Ensure it has an entry in the equality map.
     if (!equalityClass.count(name)) {
       equalityClass[name] = name;
     }
   }
 
   /// Add a lower bound constraint.
-  void addLowerBound(llvm::StringRef dim, int64_t bound) {
-    llvm::StringRef root = findRoot(dim);
+  void addLowerBound(StringAttr dim, int64_t bound) {
+    StringAttr root = findRoot(dim);
     auto it = lowerBounds.find(root);
     if (it == lowerBounds.end() || it->second < bound) {
       lowerBounds[root] = bound;
@@ -157,8 +163,8 @@ struct ShapeConstraint {
   }
 
   /// Add an upper bound constraint.
-  void addUpperBound(llvm::StringRef dim, int64_t bound) {
-    llvm::StringRef root = findRoot(dim);
+  void addUpperBound(StringAttr dim, int64_t bound) {
+    StringAttr root = findRoot(dim);
     auto it = upperBounds.find(root);
     if (it == upperBounds.end() || it->second > bound) {
       upperBounds[root] = bound;
@@ -166,15 +172,11 @@ struct ShapeConstraint {
   }
 
   /// Get all unique equality classes (representative → members).
-  llvm::DenseMap<llvm::StringRef, llvm::SmallVector<llvm::StringRef, 4>>
+  llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
   getEqualityClasses() const {
-    llvm::DenseMap<llvm::StringRef, llvm::SmallVector<llvm::StringRef, 4>>
+    llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
         classes;
-    // We need to do a const_cast workaround since findRoot modifies state.
-    // Instead, just iterate the map.
     for (auto &kv : equalityClass) {
-      // kv.first → kv.second (parent). The root is the class representative.
-      // We accumulate members by their direct parent, then resolve.
       classes[kv.second].push_back(kv.first);
     }
     return classes;
@@ -185,9 +187,10 @@ struct ShapeConstraint {
 
 /// Describes the symbolic shape of a value: a list of dimension names,
 /// one per dimension of the tensor.
+/// NOTE: Uses StringAttr for stable storage (fixes P1 #10).
 struct SymbolicShape {
   /// Dimension names, one per tensor dimension. Empty for scalars.
-  llvm::SmallVector<llvm::StringRef, 4> dimNames;
+  llvm::SmallVector<StringAttr, 4> dimNames;
 
   /// The element type of the tensor.
   Type elementType;
@@ -199,7 +202,7 @@ struct SymbolicShape {
 
   /// Construct from a RankedTensorType, using provided dimension names.
   SymbolicShape(RankedTensorType type,
-                llvm::SmallVector<llvm::StringRef, 4> names)
+                llvm::SmallVector<StringAttr, 4> names)
       : dimNames(std::move(names)), elementType(type.getElementType()),
         originalType(type) {}
 
@@ -290,7 +293,7 @@ private:
       for (int64_t dimIdx = 0; dimIdx < tensorType.getRank(); ++dimIdx) {
         if (tensorType.isDynamicDim(dimIdx)) {
           // Check for a named dimension attribute.
-          llvm::StringRef dimName = getDimName(funcOp, argIdx, dimIdx);
+          StringAttr dimName = getDimName(funcOp, argIdx, dimIdx);
 
           // Record this symbolic dimension.
           constraint.recordDim(dimName);
@@ -343,14 +346,14 @@ private:
 
       // 2D @ 2D: [M, K] × [K, N] → [M, N]
       if (lhsType.getRank() == 2 && rhsType.getRank() == 2) {
-        llvm::StringRef dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
-                                               0, lhsType, constraint);
-        llvm::StringRef dimK_lhs = getOrCreateDim(
+        StringAttr dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
+                                          0, lhsType, constraint);
+        StringAttr dimK_lhs = getOrCreateDim(
             lhsIt, shapes, matmulOp.getLhs(), 1, lhsType, constraint);
-        llvm::StringRef dimK_rhs = getOrCreateDim(
+        StringAttr dimK_rhs = getOrCreateDim(
             rhsIt, shapes, matmulOp.getRhs(), 0, rhsType, constraint);
-        llvm::StringRef dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
-                                               1, rhsType, constraint);
+        StringAttr dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
+                                          1, rhsType, constraint);
 
         // The inner dimensions K must be equal.
         constraint.addEquality(dimK_lhs, dimK_rhs);
@@ -359,16 +362,16 @@ private:
       }
       // Batched: [B, M, K] × [K, N] → [B, M, N]
       else if (lhsType.getRank() == 3 && rhsType.getRank() == 2) {
-        llvm::StringRef dimB = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
-                                               0, lhsType, constraint);
-        llvm::StringRef dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
-                                               1, lhsType, constraint);
-        llvm::StringRef dimK_lhs = getOrCreateDim(
+        StringAttr dimB = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
+                                          0, lhsType, constraint);
+        StringAttr dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
+                                          1, lhsType, constraint);
+        StringAttr dimK_lhs = getOrCreateDim(
             lhsIt, shapes, matmulOp.getLhs(), 2, lhsType, constraint);
-        llvm::StringRef dimK_rhs = getOrCreateDim(
+        StringAttr dimK_rhs = getOrCreateDim(
             rhsIt, shapes, matmulOp.getRhs(), 0, rhsType, constraint);
-        llvm::StringRef dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
-                                               1, rhsType, constraint);
+        StringAttr dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
+                                          1, rhsType, constraint);
 
         constraint.addEquality(dimK_lhs, dimK_rhs);
 
@@ -376,18 +379,18 @@ private:
       }
       // Batched: [B, M, K] × [B, K, N] → [B, M, N]
       else if (lhsType.getRank() == 3 && rhsType.getRank() == 3) {
-        llvm::StringRef dimB_lhs = getOrCreateDim(
+        StringAttr dimB_lhs = getOrCreateDim(
             lhsIt, shapes, matmulOp.getLhs(), 0, lhsType, constraint);
-        llvm::StringRef dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
-                                               1, lhsType, constraint);
-        llvm::StringRef dimK_lhs = getOrCreateDim(
+        StringAttr dimM = getOrCreateDim(lhsIt, shapes, matmulOp.getLhs(),
+                                          1, lhsType, constraint);
+        StringAttr dimK_lhs = getOrCreateDim(
             lhsIt, shapes, matmulOp.getLhs(), 2, lhsType, constraint);
-        llvm::StringRef dimB_rhs = getOrCreateDim(
+        StringAttr dimB_rhs = getOrCreateDim(
             rhsIt, shapes, matmulOp.getRhs(), 0, rhsType, constraint);
-        llvm::StringRef dimK_rhs = getOrCreateDim(
+        StringAttr dimK_rhs = getOrCreateDim(
             rhsIt, shapes, matmulOp.getRhs(), 1, rhsType, constraint);
-        llvm::StringRef dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
-                                               2, rhsType, constraint);
+        StringAttr dimN = getOrCreateDim(rhsIt, shapes, matmulOp.getRhs(),
+                                          2, rhsType, constraint);
 
         constraint.addEquality(dimK_lhs, dimK_rhs);
         constraint.addEquality(dimB_lhs, dimB_rhs);
@@ -413,9 +416,9 @@ private:
 
         unsigned rank = static_cast<unsigned>(lhsType.getRank());
         for (unsigned d = 0; d < rank; ++d) {
-          llvm::StringRef lhsDim = getOrCreateDim(
+          StringAttr lhsDim = getOrCreateDim(
               lhsIt, shapes, op->getOperand(0), d, lhsType, constraint);
-          llvm::StringRef rhsDim = getOrCreateDim(
+          StringAttr rhsDim = getOrCreateDim(
               rhsIt, shapes, op->getOperand(1), d, rhsType, constraint);
           constraint.addEquality(lhsDim, rhsDim);
           resultShape.dimNames.push_back(lhsDim);
@@ -445,11 +448,11 @@ private:
         for (unsigned d = 0; d < maxRank; ++d) {
           // Use the tensor operand's dimension name if available.
           if (d < static_cast<unsigned>(lhsType.getRank())) {
-            llvm::StringRef dimName = getOrCreateDim(
+            StringAttr dimName = getOrCreateDim(
                 lhsIt, shapes, op->getOperand(0), d, lhsType, constraint);
             resultShape.dimNames.push_back(dimName);
           } else if (d < static_cast<unsigned>(rhsType.getRank())) {
-            llvm::StringRef dimName = getOrCreateDim(
+            StringAttr dimName = getOrCreateDim(
                 rhsIt, shapes, op->getOperand(1), d, rhsType, constraint);
             resultShape.dimNames.push_back(dimName);
           }
@@ -460,9 +463,9 @@ private:
           for (unsigned d = 0;
                d < static_cast<unsigned>(lhsType.getRank()); ++d) {
             if (lhsType.isDynamicDim(d) && rhsType.isDynamicDim(d)) {
-              llvm::StringRef lhsDim = getOrCreateDim(
+              StringAttr lhsDim = getOrCreateDim(
                   lhsIt, shapes, op->getOperand(0), d, lhsType, constraint);
-              llvm::StringRef rhsDim = getOrCreateDim(
+              StringAttr rhsDim = getOrCreateDim(
                   rhsIt, shapes, op->getOperand(1), d, rhsType, constraint);
               constraint.addEquality(lhsDim, rhsDim);
             }
@@ -537,7 +540,7 @@ private:
         // The constraint is that the total number of elements is the same.
         for (int64_t d = 0; d < resultType.getRank(); ++d) {
           if (resultType.isDynamicDim(d)) {
-            llvm::StringRef dimName = generateDimName("Reshape");
+            StringAttr dimName = generateDimName("Reshape");
             constraint.recordDim(dimName);
             constraint.addLowerBound(dimName, 1);
             resultShape.dimNames.push_back(dimName);
@@ -691,7 +694,7 @@ private:
 
   // ── Helper: Get or create a symbolic dimension name ────────────────────
 
-  llvm::StringRef getOrCreateDim(
+  StringAttr getOrCreateDim(
       llvm::DenseMap<Value, SymbolicShape>::iterator &shapeIt,
       llvm::DenseMap<Value, SymbolicShape> &shapes,
       Value val, unsigned dimIdx, RankedTensorType type,
@@ -705,7 +708,7 @@ private:
 
     // Otherwise, generate a name based on whether the dimension is dynamic.
     if (type.isDynamicDim(dimIdx)) {
-      llvm::StringRef name = generateDimName("dim");
+      StringAttr name = generateDimName("dim");
       constraint.recordDim(name);
       constraint.addLowerBound(name, 1);
 
@@ -714,7 +717,7 @@ private:
       shape.originalType = type;
       shape.elementType = type.getElementType();
       while (shape.dimNames.size() <= dimIdx) {
-        shape.dimNames.push_back("");
+        shape.dimNames.push_back(StringAttr());
       }
       shape.dimNames[dimIdx] = name;
       return name;
@@ -726,20 +729,20 @@ private:
       llvm::raw_string_ostream os(staticName);
       os << "static_" << type.getDimSize(dimIdx);
     }
-    llvm::StringRef name = allocateDimName(staticName);
+    StringAttr name = allocateDimName(staticName);
     return name;
   }
 
   // ── Helper: Get dimension name from function argument attributes ────────
 
-  llvm::StringRef getDimName(func::FuncOp funcOp, unsigned argIdx,
+  StringAttr getDimName(func::FuncOp funcOp, unsigned argIdx,
                               unsigned dimIdx) {
     // Check for jules.dim_name attribute on the function argument.
     auto dimNamesAttr = funcOp.getArgAttrOfType<ArrayAttr>(argIdx,
                                                             "jules.dim_names");
     if (dimNamesAttr && dimIdx < dimNamesAttr.size()) {
       if (auto strAttr = dimNamesAttr[dimIdx].dyn_cast<StringAttr>()) {
-        return strAttr.getValue();
+        return strAttr;  // Already a StringAttr with stable storage
       }
     }
 
@@ -754,7 +757,7 @@ private:
 
   // ── Helper: Generate a unique dimension name ───────────────────────────
 
-  llvm::StringRef generateDimName(llvm::StringRef prefix) {
+  StringAttr generateDimName(llvm::StringRef prefix) {
     std::string name;
     {
       llvm::raw_string_ostream os(name);
@@ -763,16 +766,18 @@ private:
     return allocateDimName(name);
   }
 
-  // ── Helper: Allocate a persistent dimension name string ─────────────────
+  // ── Helper: Allocate a persistent dimension name as StringAttr ─────────
   //
-  // We store allocated names in a set to ensure stable StringRefs.
+  // FIX for P1 #10: We now return StringAttr (stable in MLIRContext)
+  // instead of StringRef (which could dangle if the pass is destroyed
+  // while the attribute is still referenced by the IR).
 
-  llvm::StringRef allocateDimName(const std::string &name) {
-    auto [it, inserted] = allocatedDimNames_.insert(name);
-    return *it;
+  StringAttr allocateDimName(const std::string &name) {
+    return StringAttr::get(allocatedDimNames_.insert(name).first->getKey());
   }
 
   /// Persistent storage for allocated dimension name strings.
+  /// StringSet ensures stable StringRefs that we convert to StringAttr.
   llvm::StringSet<> allocatedDimNames_;
 };
 

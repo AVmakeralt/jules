@@ -10,6 +10,9 @@
 // Standard attention: O(N^2) memory
 // Flash attention:    O(N) memory — only tiles exist in L1/L2 cache
 //
+// v2: Multi-threaded (OpenMP), with heuristic to select standard vs flash
+//     attention based on problem size and cache hierarchy.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef JULES_KERNEL_FLASH_ATTENTION_H
@@ -25,11 +28,15 @@
 #include <cmath>
 #include <cstring>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace jules {
 namespace kernel {
 
 //===----------------------------------------------------------------------===//
-// Standard Attention (baseline for comparison)
+// Standard Attention (baseline for comparison) — Multi-threaded
 //===----------------------------------------------------------------------===//
 
 void standardAttention(float* output,
@@ -37,10 +44,16 @@ void standardAttention(float* output,
                        int batch, int heads, int seq, int head_dim,
                        ExecutionArena& arena) {
     float scale = 1.0f / sqrtf((float)head_dim);
-    float* attn_weights = arena.allocate<float>(seq * seq);
 
+    // Use thread-local arenas for parallelism
+    #pragma omp parallel for collapse(2) schedule(dynamic) if(batch * heads > 4)
     for (int b = 0; b < batch; b++) {
         for (int h = 0; h < heads; h++) {
+            // Each thread needs its own scratch space
+            // For simplicity, allocate on stack if small enough
+            std::vector<float> attn_weights_vec(seq * seq);
+            float* attn_weights = attn_weights_vec.data();
+
             const float* q = Q + (b * heads + h) * seq * head_dim;
             const float* k = K + (b * heads + h) * seq * head_dim;
             const float* v = V + (b * heads + h) * seq * head_dim;
@@ -51,7 +64,18 @@ void standardAttention(float* output,
                         q, head_dim, k, head_dim,
                         0.0f, attn_weights, seq);
 
-            fusedSoftmax(attn_weights, attn_weights, seq, seq);
+            // Fused softmax in-place
+            for (int i = 0; i < seq; i++) {
+                float* row = attn_weights + i * seq;
+                float row_max = -FLT_MAX;
+                for (int j = 0; j < seq; j++) row_max = std::max(row_max, row[j]);
+                float row_sum = 0.0f;
+                for (int j = 0; j < seq; j++) {
+                    row[j] = expf(row[j] - row_max);
+                    row_sum += row[j];
+                }
+                for (int j = 0; j < seq; j++) row[j] /= row_sum;
+            }
 
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         seq, head_dim, seq, 1.0f,
@@ -64,7 +88,31 @@ void standardAttention(float* output,
 }
 
 //===----------------------------------------------------------------------===//
-// Flash Attention (CPU tiled version)
+// Auto-Selecting Attention — picks standard vs flash based on problem size
+//===----------------------------------------------------------------------===//
+//
+// On CPU, standard attention (MKL-backed matmul) is often faster because
+// CPU RAM bandwidth is relatively plentiful. Flash attention wins when
+// the N^2 attention matrix doesn't fit in L3 cache.
+//
+// Heuristic: use flash attention when seq_len > sqrt(L3_bytes / sizeof(float))
+// This means for a 6MB L3: flash when seq > ~1228
+// For a 30MB L3: flash when seq > ~2738
+
+void attention(float* output,
+               const float* Q, const float* K, const float* V,
+               int batch, int heads, int seq, int head_dim,
+               ExecutionArena& arena,
+               TilePlanner& planner) {
+    if (shouldUseFlashAttention(seq, head_dim, planner.cacheInfo().l3_bytes)) {
+        flashAttention(output, Q, K, V, batch, heads, seq, head_dim, arena, planner);
+    } else {
+        standardAttention(output, Q, K, V, batch, heads, seq, head_dim, arena);
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Flash Attention (CPU tiled version) — Multi-threaded
 //===----------------------------------------------------------------------===//
 
 void flashAttention(float* output,
@@ -88,6 +136,8 @@ void flashAttention(float* output,
         per_tile_bytes = (size_t)tile_q * (head_dim + seq) * 4 + (size_t)tile_k * head_dim * 4;
     }
 
+    // Multi-threaded across batch×heads
+    #pragma omp parallel for collapse(2) schedule(dynamic) if(batch * heads > 4)
     for (int b = 0; b < batch; b++) {
         for (int h = 0; h < heads; h++) {
             const float* q = Q + (b * heads + h) * seq * head_dim;
@@ -100,20 +150,21 @@ void flashAttention(float* output,
             for (int tq = 0; tq < seq; tq += tile_q) {
                 int tq_curr = std::min(tile_q, seq - tq);
 
-                float* running_max = arena.allocate<float>(tq_curr);
-                float* running_sum = arena.allocate<float>(tq_curr);
-                float* accum_out  = arena.allocate<float>(tq_curr * head_dim);
+                // Thread-local allocations on stack
+                std::vector<float> running_max_vec(tq_curr, -FLT_MAX);
+                std::vector<float> running_sum_vec(tq_curr, 0.0f);
+                std::vector<float> accum_out_vec(tq_curr * head_dim, 0.0f);
 
-                for (int i = 0; i < tq_curr; i++) {
-                    running_max[i] = -FLT_MAX;
-                    running_sum[i] = 0.0f;
-                }
-                memset(accum_out, 0, tq_curr * head_dim * sizeof(float));
+                float* running_max = running_max_vec.data();
+                float* running_sum = running_sum_vec.data();
+                float* accum_out = accum_out_vec.data();
 
                 for (int tk = 0; tk < seq; tk += tile_k) {
                     int tk_curr = std::min(tile_k, seq - tk);
 
-                    float* scores = arena.allocate<float>(tq_curr * tk_curr);
+                    // Allocate scores on stack for thread safety
+                    std::vector<float> scores_vec(tq_curr * tk_curr);
+                    float* scores = scores_vec.data();
 
                     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                                 tq_curr, tk_curr, head_dim, scale,
@@ -237,8 +288,6 @@ void flashAttention(float* output,
                         out[(tq + i) * head_dim + d] = accum_out[i * head_dim + d] / running_sum[i];
                 }
 #endif
-
-                arena.reset();
             }
         }
     }
