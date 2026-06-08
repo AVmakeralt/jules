@@ -150,12 +150,12 @@ void benchMatMul() {
         printf("    Jules fused (matmul+relu): %8.3f ms  (%6.1f GFLOP/s)  [%.1fx vs naive]\n",
                ms_fused_relu, flops / ms_fused_relu / 1e6, ms_naive / ms_fused_relu);
 
-        // Jules fused: BLAS matmul + in-place relu (2 ops, 1 kernel launch eliminated)
-        auto ms_blas_relu = bench_run([&]() {
+        // Jules fused matmul+relu (tiled + in-register ReLU for large, cblas+cache-hot for small)
+        auto ms_fused_mr = bench_run([&]() {
             fusedMatmulRelu(A.data(), B.data(), C.data(), M, K, N);
         });
-        printf("    Jules BLAS+relu fused: %8.3f ms  [%.1fx vs naive, %.1fx vs BLAS alone]\n",
-               ms_blas_relu, ms_naive / ms_blas_relu, ms_blas / ms_blas_relu);
+        printf("    Jules fusedMatmulRelu: %8.3f ms  [%.1fx vs naive, %.1fx vs BLAS]\n",
+               ms_fused_mr, ms_naive / ms_fused_mr, ms_blas / ms_fused_mr);
     }
 }
 

@@ -223,12 +223,6 @@ InterleavedMLPResult interleavedMLPForwardBackward(
         // Atomically accumulate thread-local gradients into shared buffers
         #pragma omp critical(jules_grad_accum)
         {
-            // Accumulate dW1
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        K1, N2, 1, 1.0f,  // Just add the local buffer
-                        local_dW1.data(), N1, nullptr, N1,
-                        1.0f, dW1, N1);
-            // Manual accumulation for small buffers
             for (int i = 0; i < K1 * N1; i++) dW1[i] += local_dW1[i];
             for (int i = 0; i < N1; i++) db1[i] += local_db1[i];
             for (int i = 0; i < N1 * N2; i++) dW2[i] += local_dW2[i];

@@ -51,6 +51,23 @@ namespace jules {
 namespace kernel {
 
 //===----------------------------------------------------------------------===//
+// Forward declarations (needed for cross-references between fused kernels)
+//===----------------------------------------------------------------------===//
+
+enum class ActivationType {
+    None,
+    Relu,
+    Sigmoid,
+    Tanh,
+    Gelu,
+};
+
+void tiledMatmulWithActivation(const float* A, const float* B, float* C,
+                                int M, int N, int K,
+                                const TileConfig& cfg,
+                                ActivationType act = ActivationType::None);
+
+//===----------------------------------------------------------------------===//
 // Utility: AVX-512 helper functions
 //===----------------------------------------------------------------------===//
 
@@ -189,8 +206,9 @@ void fusedMatmulRelu(const float* X, const float* W, float* output,
 
     if (use_tiled) {
         // Truly fused: apply ReLU in-register during tiled matmul epilogue
-        CacheInfo cacheInfo = CacheInfo::detect();
-        TilePlanner planner(cacheInfo);
+        // Use a static planner to amortize auto-tune cost across calls
+        static CacheInfo cacheInfo = CacheInfo::detect();
+        static TilePlanner planner(cacheInfo);
         TileConfig cfg = planner.getTileConfig(M, N, K);
         tiledMatmulWithActivation(X, W, output, M, N, K, cfg,
                                   ActivationType::Relu);
@@ -240,8 +258,8 @@ void fusedMatmulBiasRelu(const float* X, const float* W, const float* bias,
 
     if (use_tiled) {
         // Fused: matmul + bias + relu in one tiled pass
-        CacheInfo cacheInfo = CacheInfo::detect();
-        TilePlanner planner(cacheInfo);
+        static CacheInfo cacheInfo = CacheInfo::detect();
+        static TilePlanner planner(cacheInfo);
         TileConfig cfg = planner.getTileConfig(M, N, K);
         memset(output, 0, M * N * sizeof(float));
 
@@ -312,15 +330,17 @@ void fusedMatmulBiasRelu(const float* X, const float* W, const float* bias,
 
         int total = M * N;
 #if defined(__AVX512F__)
-        int i = 0;
-        for (; i + 15 < total; i += 16) {
-            __m512 x = _mm512_loadu_ps(output + i);
-            __m512 b = _mm512_set1_ps(bias[(i % N)]);
-            __m512 result = _mm512_add_ps(x, b);
-            _mm512_storeu_ps(output + i, relu_zmm(result));
-        }
-        for (; i < total; i++) {
-            output[i] = std::max(output[i] + bias[i % N], 0.0f);
+        for (int r = 0; r < M; r++) {
+            int j = 0;
+            for (; j + 15 < N; j += 16) {
+                __m512 x = _mm512_loadu_ps(&output[r * N + j]);
+                __m512 b = _mm512_loadu_ps(&bias[j]);
+                __m512 result = _mm512_add_ps(x, b);
+                _mm512_storeu_ps(&output[r * N + j], relu_zmm(result));
+            }
+            for (; j < N; j++) {
+                output[r * N + j] = std::max(output[r * N + j] + bias[j], 0.0f);
+            }
         }
 #else
         for (int i = 0; i < total; i++) {
@@ -334,18 +354,10 @@ void fusedMatmulBiasRelu(const float* X, const float* W, const float* bias,
 // 2. Cache-Tiled MatMul with In-Register Activation Fusion
 //===----------------------------------------------------------------------===//
 
-enum class ActivationType {
-    None,
-    Relu,
-    Sigmoid,
-    Tanh,
-    Gelu,
-};
-
 void tiledMatmulWithActivation(const float* A, const float* B, float* C,
                                 int M, int N, int K,
                                 const TileConfig& cfg,
-                                ActivationType act = ActivationType::None) {
+                                ActivationType act) {
     memset(C, 0, M * N * sizeof(float));
 
     int tm = cfg.tile_m;
@@ -638,21 +650,16 @@ void fusedMLPForward(float* output, const float* X, const MLPParams& params,
         int total_hidden = M * N1;
 #if defined(__AVX512F__)
         JULES_OMP_PARALLEL_FOR
-        for (int i = 0; i < total_hidden; i += 16) {
-            if (i + 15 < total_hidden) {
-                int row = i / N1;
-                int col = i % N1;
-                __m512 h = _mm512_loadu_ps(hidden + i);
-                // Load bias for each column position
-                alignas(64) float bvals[16];
-                for (int k = 0; k < 16; k++) bvals[k] = params.b1[(i + k) % N1];
-                __m512 b = _mm512_load_ps(bvals);
+        for (int r = 0; r < M; r++) {
+            int j = 0;
+            for (; j + 15 < N1; j += 16) {
+                __m512 h = _mm512_loadu_ps(&hidden[r * N1 + j]);
+                __m512 b = _mm512_loadu_ps(&params.b1[j]);
                 h = _mm512_add_ps(h, b);
-                _mm512_storeu_ps(hidden + i, relu_zmm(h));
-            } else {
-                for (int k = i; k < total_hidden; k++) {
-                    hidden[k] = std::max(hidden[k] + params.b1[k % N1], 0.0f);
-                }
+                _mm512_storeu_ps(&hidden[r * N1 + j], relu_zmm(h));
+            }
+            for (; j < N1; j++) {
+                hidden[r * N1 + j] = std::max(hidden[r * N1 + j] + params.b1[j], 0.0f);
             }
         }
 #else
@@ -683,17 +690,17 @@ void fusedMLPForward(float* output, const float* X, const MLPParams& params,
 
             int hidden_total = tm * N1;
 #if defined(__AVX512F__)
-            int j = 0;
-            for (; j + 15 < hidden_total; j += 16) {
-                __m512 h = _mm512_loadu_ps(hidden_tile.data() + j);
-                alignas(64) float bvals[16];
-                for (int k = 0; k < 16; k++) bvals[k] = params.b1[(j + k) % N1];
-                __m512 b = _mm512_load_ps(bvals);
-                h = _mm512_add_ps(h, b);
-                _mm512_storeu_ps(hidden_tile.data() + j, relu_zmm(h));
-            }
-            for (; j < hidden_total; j++) {
-                hidden_tile[j] = std::max(hidden_tile[j] + params.b1[j % N1], 0.0f);
+            for (int r = 0; r < tm; r++) {
+                int j = 0;
+                for (; j + 15 < N1; j += 16) {
+                    __m512 h = _mm512_loadu_ps(&hidden_tile[r * N1 + j]);
+                    __m512 b = _mm512_loadu_ps(&params.b1[j]);
+                    h = _mm512_add_ps(h, b);
+                    _mm512_storeu_ps(&hidden_tile[r * N1 + j], relu_zmm(h));
+                }
+                for (; j < N1; j++) {
+                    hidden_tile[r * N1 + j] = std::max(hidden_tile[r * N1 + j] + params.b1[j], 0.0f);
+                }
             }
 #else
             for (int j = 0; j < hidden_total; j++) {

@@ -36,6 +36,16 @@ namespace jules {
 namespace kernel {
 
 //===----------------------------------------------------------------------===//
+// Forward declarations
+//===----------------------------------------------------------------------===//
+
+void flashAttention(float* output,
+                    const float* Q, const float* K, const float* V,
+                    int batch, int heads, int seq, int head_dim,
+                    ExecutionArena& arena,
+                    TilePlanner& planner);
+
+//===----------------------------------------------------------------------===//
 // Standard Attention (baseline for comparison) — Multi-threaded
 //===----------------------------------------------------------------------===//
 
