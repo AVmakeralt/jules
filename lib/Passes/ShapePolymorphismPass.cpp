@@ -649,7 +649,7 @@ private:
       for (auto &[rep, members] : classes) {
         if (members.size() > 1) {
           // Skip static dimensions.
-          if (rep.starts_with("static_")) continue;
+          if (rep.startswith("static_")) continue;
 
           if (!first) os << "; ";
           first = false;

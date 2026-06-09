@@ -26,6 +26,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 
 using namespace mlir;
 using namespace jules;
@@ -171,9 +172,9 @@ struct SIMDLayoutPass
       // Mark transpose-like and reshape-like ops as needing contiguous
       // output enforcement.  The downstream lowering will insert an
       // explicit copy when the output may be non-contiguous.
-      if (op->getName().getStringRef().contains("transpose") ||
-          op->getName().getStringRef().contains("reshape") ||
-          op->getName().getStringRef().contains("broadcast_in_dim")) {
+      if (op->getName().getStringRef().find("transpose") != StringRef::npos ||
+          op->getName().getStringRef().find("reshape") != StringRef::npos ||
+          op->getName().getStringRef().find("broadcast_in_dim") != StringRef::npos) {
         op->setAttr("simd.ensure_contiguous",
                     UnitAttr::get(op->getContext()));
         op->setAttr("simd.alignment",
