@@ -23,9 +23,6 @@ using namespace mlir;
 // Include the definitions for the dialect class (constructor, destructor, etc.)
 #include "jules/Dialect/JulesOpsDialect.cpp.inc"
 
-// Include the op definitions
-#include "jules/Dialect/JulesOps.cpp.inc"
-
 // ── Dialect initialization ─────────────────────────────────────────────────
 
 void jules::JulesDialect::initialize() {

@@ -55,7 +55,6 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 // TableGen'd operation declarations

@@ -590,9 +590,9 @@ struct PolyhedralOptPass
     for (Operation *op : backwardOps) {
       if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
         // Check if either operand is a transpose (gradient matmul marker).
-        bool isLhsTranspose = isa_and_nonnull<TransposeOp>(
+        bool isLhsTranspose = llvm::isa_and_nonnull<TransposeOp>(
             matmulOp.getLhs().getDefiningOp());
-        bool isRhsTranspose = isa_and_nonnull<TransposeOp>(
+        bool isRhsTranspose = llvm::isa_and_nonnull<TransposeOp>(
             matmulOp.getRhs().getDefiningOp());
 
         if (isLhsTranspose || isRhsTranspose) {
