@@ -31,6 +31,8 @@
 #include <sstream>
 #include <string>
 
+#include "llvm/Support/raw_ostream.h"
+
 using namespace mlir;
 using namespace jules;
 
@@ -60,13 +62,14 @@ bool Compiler::compile() {
 
   // If we're only emitting the AST, dump it and stop.
   if (options_.emissionMode == CompilerOptions::EmitAST) {
-    std::ostream &out = (options_.outputFile == "-" || options_.outputFile.empty())
-                            ? std::cout
-                            : *(new std::ofstream(options_.outputFile));
+    std::error_code EC;
+    llvm::raw_ostream &out = (options_.outputFile == "-" || options_.outputFile.empty())
+                            ? llvm::outs()
+                            : *new llvm::raw_fd_ostream(options_.outputFile, EC);
     for (const auto &fn : program->getFunctions()) {
       out << fn->getName() << " : " << fn->getType()->toString() << "\n";
     }
-    if (&out != &std::cout) delete &out;
+    if (&out != &llvm::outs()) delete &out;
     return true;
   }
 
@@ -336,25 +339,25 @@ bool Compiler::emitOutput() {
     return false;
   }
 
-  std::ostream *out = &std::cout;
-  std::ofstream outFile;
-  if (options_.outputFile != "-" && !options_.outputFile.empty()) {
-    outFile.open(options_.outputFile);
-    if (!outFile.is_open()) {
-      diag_.error(SourceLocation{},
-                  "cannot open output file: " + options_.outputFile);
-      return false;
-    }
-    out = &outFile;
-  }
-
   if (mlirModule_) {
     auto printingFlags = OpPrintingFlags();
     printingFlags.useLocalScope();
     printingFlags.enableDebugInfo();
 
-    mlirModule_->print(*out, printingFlags);
-    *out << "\n";
+    if (options_.outputFile == "-" || options_.outputFile.empty()) {
+      mlirModule_->print(llvm::outs(), printingFlags);
+      llvm::outs() << "\n";
+    } else {
+      std::error_code EC;
+      llvm::raw_fd_ostream outFile(options_.outputFile, EC);
+      if (EC) {
+        diag_.error(SourceLocation{},
+                    "cannot open output file: " + options_.outputFile);
+        return false;
+      }
+      mlirModule_->print(outFile, printingFlags);
+      outFile << "\n";
+    }
   }
 
   return true;
