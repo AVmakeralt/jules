@@ -16,10 +16,15 @@
 
 using namespace mlir;
 
-#define GET_DIALECT_CLASSES
-#include "jules/Dialect/JulesOps.cpp.inc"
+// Include the full op class declarations (needed for addOperations<> below)
+#define GET_OP_CLASSES
+#include "jules/Dialect/JulesOps.h.inc"
 
+// Include the definitions for the dialect class (constructor, destructor, etc.)
 #include "jules/Dialect/JulesOpsDialect.cpp.inc"
+
+// Include the op definitions
+#include "jules/Dialect/JulesOps.cpp.inc"
 
 // ── Dialect initialization ─────────────────────────────────────────────────
 
@@ -27,7 +32,7 @@ void jules::JulesDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "jules/Dialect/JulesOps.cpp.inc"
-      >();
+  >();
 
   // Register custom types for mixed precision support.
   addTypes<BF16Type, FP8E4M3Type, FP8E5M2Type>();

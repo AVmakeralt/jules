@@ -31,12 +31,13 @@
 #define JULES_COMPILER_H
 
 #include "jules/Diagnostics.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/OwningOpRef.h"
 #include <memory>
 #include <string>
 
 namespace mlir {
 class MLIRContext;
-class ModuleOp;
 class OpPrintingFlags;
 } // namespace mlir
 
@@ -189,7 +190,7 @@ private:
   CompilerOptions                          options_;
   DiagnosticsEngine                        diag_;
   std::unique_ptr<mlir::MLIRContext>       mlirContext_;
-  std::unique_ptr<mlir::ModuleOp>          mlirModule_;
+  mlir::OwningOpRef<mlir::ModuleOp>          mlirModule_;
 };
 
 } // namespace jules

@@ -61,6 +61,9 @@ struct CachePolicyConfig {
 
   /// Estimated minimum speedup factor from Tier 2.
   double minSpeedupFactor = 2.0;
+
+  /// Enable verbose logging of cache policy decisions.
+  bool verbose = false;
 };
 
 // ── Compilation Decision ────────────────────────────────────────────────────

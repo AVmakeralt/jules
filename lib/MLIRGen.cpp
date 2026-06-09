@@ -41,7 +41,7 @@ MLIRGenerator::MLIRGenerator(MLIRContext &context, DiagnosticsEngine &diag)
       builder_(&context),
       currentFunc_() {}
 
-std::unique_ptr<ModuleOp> MLIRGenerator::lowerProgram(Program &program) {
+OwningOpRef<ModuleOp> MLIRGenerator::lowerProgram(Program &program) {
   // Register the Jules dialect.
   context_.getOrLoadDialect<JulesDialect>();
   context_.getOrLoadDialect<func::FuncDialect>();
@@ -585,9 +585,9 @@ void MLIRGenerator::popScope() {
 // Public entry point
 //===----------------------------------------------------------------------===//
 
-std::unique_ptr<ModuleOp> jules::lowerASTToMLIR(MLIRContext &context,
-                                                  Program &program,
-                                                  DiagnosticsEngine &diag) {
+OwningOpRef<ModuleOp> jules::lowerASTToMLIR(MLIRContext &context,
+                                                Program &program,
+                                                DiagnosticsEngine &diag) {
   MLIRGenerator generator(context, diag);
   return generator.lowerProgram(program);
 }

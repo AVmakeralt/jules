@@ -19,6 +19,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -35,9 +37,9 @@ class FunctionType;
 class DiagnosticsEngine;
 
 /// Lower a Jules AST Program into an MLIR ModuleOp.
-std::unique_ptr<mlir::ModuleOp> lowerASTToMLIR(mlir::MLIRContext &context,
-                                                 Program &program,
-                                                 DiagnosticsEngine &diag);
+mlir::OwningOpRef<mlir::ModuleOp> lowerASTToMLIR(mlir::MLIRContext &context,
+                                                   Program &program,
+                                                   DiagnosticsEngine &diag);
 
 /// The implementation of the AST -> MLIR lowering.
 class MLIRGenerator {
@@ -45,7 +47,7 @@ public:
   explicit MLIRGenerator(mlir::MLIRContext &context, DiagnosticsEngine &diag);
 
   /// Lower an entire Program.
-  std::unique_ptr<mlir::ModuleOp> lowerProgram(Program &program);
+  mlir::OwningOpRef<mlir::ModuleOp> lowerProgram(Program &program);
 
 private:
   /// Lower a FunctionDecl to a func::FuncOp.
@@ -72,7 +74,7 @@ private:
   // ── Members ──────────────────────────────────────────────────────────────
   mlir::MLIRContext                                       &context_;
   DiagnosticsEngine                                       &diag_;
-  std::unique_ptr<mlir::ModuleOp>                          module_;
+  mlir::OwningOpRef<mlir::ModuleOp>                        module_;
   mlir::OpBuilder                                          builder_;
 
   /// Scoped variable table (stack of name->value maps).

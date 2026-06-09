@@ -142,6 +142,7 @@ public:
 
   /// Get the profile for a trace.
   TraceProfile *getTraceProfile(uint64_t traceId);
+  const TraceProfile *getTraceProfile(uint64_t traceId) const;
 
   /// Get the static shapes for a trace (for PGO recompilation).
   /// Returns nullopt if shapes aren't stable yet.

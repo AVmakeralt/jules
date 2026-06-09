@@ -20,12 +20,15 @@ std::string Dimension::toString() const {
 
 std::string ScalarType::toString() const {
   switch (kind_) {
-  case SK_F32:  return "f32";
-  case SK_F64:  return "f64";
-  case SK_I32:  return "i32";
-  case SK_I64:  return "i64";
-  case SK_Bool: return "bool";
-  case SK_Unit: return "unit";
+  case SK_F32:    return "f32";
+  case SK_F64:    return "f64";
+  case SK_I32:    return "i32";
+  case SK_I64:    return "i64";
+  case SK_Bool:   return "bool";
+  case SK_Unit:   return "unit";
+  case SK_BF16:   return "bf16";
+  case SK_FP8E4M3: return "fp8e4m3";
+  case SK_FP8E5M2: return "fp8e5m2";
   }
   return "unknown";
 }
@@ -62,7 +65,7 @@ std::string TensorType::toString() const {
     if (i > 0) oss << ", ";
     oss << dims_[i].toString();
   }
-  oss << "]" << ScalarType(element_).toString();
+  oss << "]" << jules::ScalarType(element_).toString();
   return oss.str();
 }
 

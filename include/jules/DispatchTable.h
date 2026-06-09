@@ -28,6 +28,7 @@
 #define JULES_DISPATCH_TABLE_H
 
 #include "jules/AST.h"
+#include "jules/PJRT.h"
 #include "jules/Diagnostics.h"
 #include <atomic>
 #include <cstdint>

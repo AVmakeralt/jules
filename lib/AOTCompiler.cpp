@@ -61,7 +61,7 @@ std::shared_ptr<ExecutableHandle> AOTCompiler::compileFromAST(Program &program) 
   }
 
   // Step 4: Compile from MLIR.
-  return compileFromMLIR(module);
+  return compileFromMLIR(*module);
 }
 
 std::shared_ptr<ExecutableHandle> AOTCompiler::compileFromMLIR(
@@ -126,7 +126,7 @@ std::unique_ptr<Program> AOTCompiler::parseSource(const std::string &source,
   return program;
 }
 
-ModuleOp AOTCompiler::lowerToMLIR(Program &program) {
+OwningOpRef<ModuleOp> AOTCompiler::lowerToMLIR(Program &program) {
   mlirContext_ = std::make_unique<MLIRContext>();
   mlirContext_->getOrLoadDialect<JulesDialect>();
   mlirContext_->getOrLoadDialect<func::FuncDialect>();
@@ -213,7 +213,7 @@ bool AOTCompiler::injectTelemetry(ModuleOp module) {
   module.walk([&](func::FuncOp funcOp) {
     // Don't instrument internal/__jules functions.
     auto name = funcOp.getName();
-    if (name.startswith("__jules_")) return;
+    if (name.starts_with("__jules_")) return;
 
     // Add telemetry enabled attribute to the function.
     funcOp->setAttr("jules.telemetry.enabled",
@@ -221,8 +221,7 @@ bool AOTCompiler::injectTelemetry(ModuleOp module) {
 
     // Assign a unique function ID for telemetry correlation.
     funcOp->setAttr("jules.telemetry.function_id",
-                    IntegerAttr::get(funcOp.getContext(),
-                                     IntegerType::get(funcOp.getContext(), 32),
+                    IntegerAttr::get(IntegerType::get(funcOp.getContext(), 32),
                                      nextFuncId++));
 
     // Mark each argument with its position for shape tracking.

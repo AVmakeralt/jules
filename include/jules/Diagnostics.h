@@ -58,6 +58,9 @@ public:
   void note(SourceLocation loc, const std::string &msg) {
     emit(DiagnosticSeverity::Note, loc, msg);
   }
+  void info(SourceLocation loc, const std::string &msg) {
+    emit(DiagnosticSeverity::Note, loc, msg);
+  }
   void warning(SourceLocation loc, const std::string &msg) {
     emit(DiagnosticSeverity::Warning, loc, msg);
   }

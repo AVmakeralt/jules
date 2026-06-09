@@ -42,7 +42,7 @@ namespace jules {
 // the same dynamic range as f32 but with reduced precision, making it ideal
 // for deep learning workloads where range matters more than precision.
 
-class BF16Type : public Type::TypeBase<BF16Type, Type, TypeStorage> {
+class BF16Type : public ::mlir::Type::TypeBase<BF16Type, ::mlir::Type, ::mlir::TypeStorage> {
 public:
   using Base::Base;
 
@@ -50,7 +50,7 @@ public:
   static constexpr llvm::StringLiteral name = "jules.bf16";
 
   /// Get or create a BF16Type in the given context.
-  static BF16Type get(MLIRContext *ctx);
+  static BF16Type get(::mlir::MLIRContext *ctx);
 
   /// Return the bit width of this type.
   unsigned getWidth() const { return 16; }
@@ -72,7 +72,7 @@ public:
 // The format uses 1 sign bit, 4 exponent bits (bias=7), and 3 mantissa bits.
 // Maximum representable value: 448.0. Does not support NaN or Inf.
 
-class FP8E4M3Type : public Type::TypeBase<FP8E4M3Type, Type, TypeStorage> {
+class FP8E4M3Type : public ::mlir::Type::TypeBase<FP8E4M3Type, ::mlir::Type, ::mlir::TypeStorage> {
 public:
   using Base::Base;
 
@@ -80,7 +80,7 @@ public:
   static constexpr llvm::StringLiteral name = "jules.fp8_e4m3";
 
   /// Get or create an FP8E4M3Type in the given context.
-  static FP8E4M3Type get(MLIRContext *ctx);
+  static FP8E4M3Type get(::mlir::MLIRContext *ctx);
 
   /// Return the bit width of this type.
   unsigned getWidth() const { return 8; }
@@ -102,7 +102,7 @@ public:
 // The format uses 1 sign bit, 5 exponent bits (bias=15), and 2 mantissa bits.
 // Maximum representable value: 57344.0. Supports NaN and Inf.
 
-class FP8E5M2Type : public Type::TypeBase<FP8E5M2Type, Type, TypeStorage> {
+class FP8E5M2Type : public ::mlir::Type::TypeBase<FP8E5M2Type, ::mlir::Type, ::mlir::TypeStorage> {
 public:
   using Base::Base;
 
@@ -110,7 +110,7 @@ public:
   static constexpr llvm::StringLiteral name = "jules.fp8_e5m2";
 
   /// Get or create an FP8E5M2Type in the given context.
-  static FP8E5M2Type get(MLIRContext *ctx);
+  static FP8E5M2Type get(::mlir::MLIRContext *ctx);
 
   /// Return the bit width of this type.
   unsigned getWidth() const { return 8; }

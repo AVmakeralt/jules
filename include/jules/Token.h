@@ -68,7 +68,7 @@ enum class TokenKind : uint16_t {
   Semicolon,      // ;
   Dot,            // .
   Equals,         // =
-  Backslash,      // \
+  Backslash,      // backslash
 
   // ── Operators ────────────────────────────────────────────────────────────
   Arrow,          // ->

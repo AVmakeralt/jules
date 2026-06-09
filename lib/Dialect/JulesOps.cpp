@@ -30,6 +30,7 @@ using namespace jules;
 //===----------------------------------------------------------------------===//
 
 #define GET_OP_CLASSES
+#include "jules/Dialect/JulesOps.h.inc"
 #include "jules/Dialect/JulesOps.cpp.inc"
 
 //===----------------------------------------------------------------------===//
@@ -47,88 +48,15 @@ void ConstantOp::build(OpBuilder &builder, OperationState &result,
   result.addTypes(type);
 }
 
-LogicalResult ConstantOp::verify() {
-  auto valueAttr = this->getValueAttr();
-  auto resultType = getResult().getType();
-
-  if (auto floatType = resultType.dyn_cast<FloatType>()) {
-    if (!valueAttr.getType().isa<FloatType>()) {
-      return emitOpError("result type is float but value is not");
-    }
-    return success();
-  }
-
-  if (auto integerType = resultType.dyn_cast<IntegerType>()) {
-    if (!valueAttr.getType().isa<IntegerType>()) {
-      return emitOpError("result type is integer but value is not");
-    }
-    return success();
-  }
-
-  if (auto tensorType = resultType.dyn_cast<RankedTensorType>()) {
-    // Tensor constant: value should be an ElementsAttr.
-    if (auto elementsAttr = valueAttr.dyn_cast<ElementsAttr>()) {
-      if (elementsAttr.getType() != tensorType) {
-        return emitOpError("constant value type doesn't match result type");
-      }
-      return success();
-    }
-    // DenseFPElementsAttr for float tensors
-    if (auto denseAttr = valueAttr.dyn_cast<DenseFPElementsAttr>()) {
-      return success();
-    }
-    if (auto denseAttr = valueAttr.dyn_cast<DenseIntElementsAttr>()) {
-      return success();
-    }
-    return emitOpError("tensor constant requires DenseElementsAttr");
-  }
-
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.add
-//===----------------------------------------------------------------------===//
-
-LogicalResult AddOp::verify() {
-  if (getLhs().getType() != getRhs().getType()) {
-    // Allow broadcasting by not strictly requiring type equality.
-    // The type inference pass will resolve the broadcast shape.
-  }
-  return success();
-}
-
 //===----------------------------------------------------------------------===//
 // jules.matmul
 //===----------------------------------------------------------------------===//
 
-LogicalResult MatMulOp::verify() {
-  auto lhsType = getLhs().getType().dyn_cast<RankedTensorType>();
-  auto rhsType = getRhs().getType().dyn_cast<RankedTensorType>();
-
-  if (!lhsType || !rhsType) {
-    return emitOpError("matmul requires ranked tensor operands");
-  }
-
-  // Verify dimension compatibility for 2D matmul.
-  if (lhsType.getRank() == 2 && rhsType.getRank() == 2) {
-    int64_t lhsInner = lhsType.getDimSize(1);
-    int64_t rhsInner = rhsType.getDimSize(0);
-    if (lhsInner != ShapedType::kDynamic &&
-        rhsInner != ShapedType::kDynamic &&
-        lhsInner != rhsInner) {
-      return emitOpError("matmul inner dimensions must match: ")
-             << lhsInner << " vs " << rhsInner;
-    }
-  }
-
-  return success();
-}
-
 // Infer result type for matmul.
-::llvm::SmallVector<Type, 1> MatMulOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult MatMulOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto lhsType = operands[0].getType().dyn_cast<RankedTensorType>();
   auto rhsType = operands[1].getType().dyn_cast<RankedTensorType>();
@@ -136,7 +64,7 @@ LogicalResult MatMulOp::verify() {
   if (!lhsType || !rhsType) {
     inferredReturnTypes.push_back(UnrankedTensorType::get(
         FloatType::getF32(context)));
-    return ::llvm::SmallVector<Type, 1>();
+    return success();
   }
 
   Type elemType = lhsType.getElementType();
@@ -149,7 +77,7 @@ LogicalResult MatMulOp::verify() {
     };
     inferredReturnTypes.push_back(
         RankedTensorType::get(shape, elemType));
-    return ::llvm::SmallVector<Type, 1>();
+    return success();
   }
 
   // Batched: [B, M, K] ** [K, N] -> [B, M, N]
@@ -161,7 +89,7 @@ LogicalResult MatMulOp::verify() {
     };
     inferredReturnTypes.push_back(
         RankedTensorType::get(shape, elemType));
-    return ::llvm::SmallVector<Type, 1>();
+    return success();
   }
 
   // Batched: [B, M, K] ** [B, K, N] -> [B, M, N]
@@ -173,57 +101,61 @@ LogicalResult MatMulOp::verify() {
     };
     inferredReturnTypes.push_back(
         RankedTensorType::get(shape, elemType));
-    return ::llvm::SmallVector<Type, 1>();
+    return success();
   }
 
   // Fallback
   inferredReturnTypes.push_back(UnrankedTensorType::get(elemType));
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.relu
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> ReluOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult ReluOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.sigmoid
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> SigmoidOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult SigmoidOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.tanh
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> TanhOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult TanhOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.mean
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> MeanOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult MeanOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
   if (inputType) {
@@ -234,16 +166,17 @@ LogicalResult MatMulOp::verify() {
     inferredReturnTypes.push_back(
         UnrankedTensorType::get(FloatType::getF32(context)));
   }
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.sum
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> SumOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult SumOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
   if (inputType) {
@@ -254,7 +187,7 @@ LogicalResult MatMulOp::verify() {
     inferredReturnTypes.push_back(
         UnrankedTensorType::get(FloatType::getF32(context)));
   }
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -301,9 +234,10 @@ void RandomOp::build(OpBuilder &builder, OperationState &result,
 // jules.transpose
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> TransposeOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult TransposeOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
   if (inputType) {
@@ -315,7 +249,7 @@ void RandomOp::build(OpBuilder &builder, OperationState &result,
     inferredReturnTypes.push_back(
         UnrankedTensorType::get(FloatType::getF32(context)));
   }
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -333,22 +267,13 @@ void ReshapeOp::build(OpBuilder &builder, OperationState &result,
 }
 
 //===----------------------------------------------------------------------===//
-// jules.grad
-//===----------------------------------------------------------------------===//
-
-LogicalResult GradOp::verify() {
-  // The grad operation will be replaced by the autodiff pass with
-  // the actual forward + backward computation.
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // jules.mul
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> MulOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult MulOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   // Element-wise multiply: result type is the broadcast of the two inputs.
   auto lhsType = operands[0].getType();
@@ -365,278 +290,22 @@ LogicalResult GradOp::verify() {
       inferredReturnTypes.push_back(lhsType);
     }
   }
-  return ::llvm::SmallVector<Type, 1>();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // jules.sub
 //===----------------------------------------------------------------------===//
 
-::llvm::SmallVector<Type, 1> SubOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
+LogicalResult SubOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, ::mlir::OpaqueProperties properties,
+    RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.div
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> DivOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.pow
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> PowOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.neg
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> NegOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.cast
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> CastOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  // The result type is determined by the target_type attribute.
-  if (auto typeAttr = attributes.get("target_type")) {
-    if (auto ty = typeAttr.dyn_cast<TypeAttr>()) {
-      inferredReturnTypes.push_back(ty.getValue());
-      return ::llvm::SmallVector<Type, 1>();
-    }
-  }
-  inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.concat
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> ConcatOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  // Result type matches the first operand's type.
-  if (!operands.empty()) {
-    inferredReturnTypes.push_back(operands[0].getType());
-  }
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.slice
-//===----------------------------------------------------------------------===//
-
-LogicalResult SliceOp::verify() {
-  // Verify slice bounds are valid.
   return success();
 }
 
 //===----------------------------------------------------------------------===//
-// jules.select
+// jules.zeros
 //===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> SelectOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  // Result type matches the true_value / false_value type.
-  if (operands.size() >= 3) {
-    inferredReturnTypes.push_back(operands[1].getType());
-  }
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.cmp
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> CmpOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
-  if (inputType) {
-    inferredReturnTypes.push_back(
-        RankedTensorType::get(inputType.getShape(),
-                              IntegerType::get(context, 1)));
-  } else {
-    inferredReturnTypes.push_back(IntegerType::get(context, 1));
-  }
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.log
-//===----------------------------------------------------------------------===//
-
-::llvm::SmallVector<Type, 1> LogOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  // log preserves the input type.
-  inferredReturnTypes.push_back(operands[0].getType());
-  return ::llvm::SmallVector<Type, 1>();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.pad
-//===----------------------------------------------------------------------===//
-
-LogicalResult PadOp::verify() {
-  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
-  auto padValueType = getPaddingValue().getType().dyn_cast<RankedTensorType>();
-  if (!inputType) {
-    return emitOpError("pad requires ranked tensor input");
-  }
-  // The padding_value must be a scalar tensor.
-  if (padValueType && padValueType.getRank() != 0) {
-    return emitOpError("padding_value must be a scalar tensor");
-  }
-  // Check that padding attributes have the correct size (one entry per dim).
-  auto rank = inputType.getRank();
-  if (static_cast<int64_t>(getPaddingLow().size()) != rank) {
-    return emitOpError("padding_low size must match input rank");
-  }
-  if (static_cast<int64_t>(getPaddingHigh().size()) != rank) {
-    return emitOpError("padding_high size must match input rank");
-  }
-  if (static_cast<int64_t>(getInteriorPadding().size()) != rank) {
-    return emitOpError("interior_padding size must match input rank");
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.broadcast_in_dim
-//===----------------------------------------------------------------------===//
-
-LogicalResult BroadcastInDimOp::verify() {
-  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
-  auto resultType = getResult().getType().dyn_cast<RankedTensorType>();
-  if (!inputType || !resultType) {
-    return emitOpError("broadcast_in_dim requires ranked tensor operands");
-  }
-  auto broadcastDims = getBroadcastDimensions();
-  if (static_cast<int64_t>(broadcastDims.size()) != inputType.getRank()) {
-    return emitOpError("broadcast_dimensions size must match input rank");
-  }
-  // Verify that each broadcast dimension is within the result rank.
-  for (auto attr : broadcastDims) {
-    int64_t dim = attr.cast<IntegerAttr>().getInt();
-    if (dim < 0 || dim >= resultType.getRank()) {
-      return emitOpError("broadcast dimension out of range");
-    }
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.reduce
-//===----------------------------------------------------------------------===//
-
-LogicalResult ReduceOp::verify() {
-  auto inputType = getInput().getType().dyn_cast<RankedTensorType>();
-  if (!inputType) {
-    return emitOpError("reduce requires ranked tensor input");
-  }
-  auto &body = getBody();
-  if (body.empty()) {
-    return emitOpError("reduce must have a non-empty body region");
-  }
-  if (body.getNumArguments() != 2) {
-    return emitOpError("reduce body must take exactly 2 arguments "
-                       "(accumulator, element)");
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.while
-//===----------------------------------------------------------------------===//
-
-LogicalResult WhileOp::verify() {
-  auto &condRegion = getCond();
-  auto &bodyRegion = getBody();
-
-  // The condition region must produce a single i1 or tensor<i1> result.
-  if (condRegion.empty()) {
-    return emitOpError("while must have a non-empty condition region");
-  }
-  if (bodyRegion.empty()) {
-    return emitOpError("while must have a non-empty body region");
-  }
-
-  // The condition region should have the same number of arguments as
-  // carried variables.
-  auto numCarriedVars = getCarriedVars().size();
-  if (condRegion.getNumArguments() != numCarriedVars) {
-    return emitOpError("condition region argument count must match "
-                       "carried variable count");
-  }
-  if (bodyRegion.getNumArguments() != numCarriedVars) {
-    return emitOpError("body region argument count must match "
-                       "carried variable count");
-  }
-
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.parallel
-//===----------------------------------------------------------------------===//
-
-LogicalResult ParallelOp::verify() {
-  if (getLowerBound() < 0) {
-    return emitOpError("lower bound must be non-negative");
-  }
-  if (getUpperBound() < getLowerBound()) {
-    return emitOpError("upper bound must be >= lower bound");
-  }
-  if (getStep() <= 0) {
-    return emitOpError("step must be positive");
-  }
-  auto &bodyRegion = getBody();
-  if (bodyRegion.empty()) {
-    return emitOpError("parallel must have a non-empty body region");
-  }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.extern_kernel
-//===----------------------------------------------------------------------===//
-
-LogicalResult ExternKernelOp::verify() {
-  if (getKernelName().empty()) {
-    return emitOpError("kernel_name must not be empty");
-  }
-  return success();
-}

@@ -39,6 +39,7 @@
 #include "jules/Compiler.h"
 #include "jules/DispatchTable.h"
 #include "jules/Diagnostics.h"
+#include "mlir/IR/OwningOpRef.h"
 #include <memory>
 #include <string>
 
@@ -128,7 +129,7 @@ private:
                                         const std::string &sourceName);
 
   /// Lower an AST to MLIR in the Jules dialect.
-  mlir::ModuleOp lowerToMLIR(Program &program);
+  mlir::OwningOpRef<mlir::ModuleOp> lowerToMLIR(Program &program);
 
   /// Run the full AOT optimization pipeline on an MLIR module.
   bool runAOTPipeline(mlir::ModuleOp module);

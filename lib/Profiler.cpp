@@ -165,6 +165,12 @@ TraceProfile *Profiler::getTraceProfile(uint64_t traceId) {
   return it != profiles_.end() ? it->second.get() : nullptr;
 }
 
+const TraceProfile *Profiler::getTraceProfile(uint64_t traceId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = profiles_.find(traceId);
+  return it != profiles_.end() ? it->second.get() : nullptr;
+}
+
 std::optional<std::unordered_map<TraceValueId, std::vector<int64_t>>>
 Profiler::getStaticShapes(uint64_t traceId) const {
   std::lock_guard<std::mutex> lock(mutex_);

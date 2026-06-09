@@ -43,8 +43,6 @@ def Jules_Dialect : Dialect {
 
 class JulesOp<string mnemonic, list<Trait> traits = []> :
     Op<Jules_Dialect, mnemonic, traits> {
-  let parser = [{ return parseJulesOp(parser, result); }];
-  let printer = [{ printJulesOp(p, *this); }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -57,9 +55,9 @@ def ConstantOp : JulesOp<"constant", [Pure, ConstantLike]> {
     Creates a constant scalar or tensor value. The value is specified as a
     FloatAttr, IntegerAttr, or DenseElementsAttr.
   }];
-  let arguments = (ins AttrAttr:$value);
+  let arguments = (ins AnyAttr:$value);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$value attr-dict `:` type($result)";
+  let hasCustomAssemblyFormat = 1;
   let hasFolder = 1;
   let builders = [
     OpBuilder<(ins "double":$value, "Type":$type)>
@@ -78,22 +76,22 @@ def AddOp : JulesOp<"add", [Pure, Commutative, SameOperandsAndResultType]> {
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   let hasFolder = 1;
 }
 
-def SubOp : JulesOp<"sub", [Pure, SameOperandsAndResultType]> {
+def SubOp : JulesOp<"sub", [Pure, SameOperandsAndResultType, InferTypeOpInterface]> {
   let summary = "Element-wise subtraction";
   let description = [{
     Computes element-wise subtraction of two tensors or scalars.
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   let hasFolder = 1;
 }
 
-def MulOp : JulesOp<"mul", [Pure, Commutative]> {
+def MulOp : JulesOp<"mul", [Pure, Commutative, InferTypeOpInterface]> {
   let summary = "Element-wise multiplication";
   let description = [{
     Computes element-wise multiplication of two tensors or scalars.
@@ -101,8 +99,18 @@ def MulOp : JulesOp<"mul", [Pure, Commutative]> {
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   let hasFolder = 1;
+  let extraClassDeclaration = [{
+    static ::llvm::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::std::optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 def DivOp : JulesOp<"div", [Pure]> {
@@ -112,7 +120,7 @@ def DivOp : JulesOp<"div", [Pure]> {
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
 def PowOp : JulesOp<"pow", [Pure]> {
@@ -122,7 +130,7 @@ def PowOp : JulesOp<"pow", [Pure]> {
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
 def NegOp : JulesOp<"neg", [Pure, SameOperandsAndResultType]> {
@@ -140,25 +148,29 @@ def NegOp : JulesOp<"neg", [Pure, SameOperandsAndResultType]> {
 // Matrix operations
 //===----------------------------------------------------------------------===//
 
-def MatMulOp : JulesOp<"matmul", [Pure]> {
+def MatMulOp : JulesOp<"matmul", [Pure, InferTypeOpInterface]> {
   let summary = "Matrix multiplication";
   let description = [{
     Computes matrix multiplication. Supports 2D and batched variants:
       [M, K] ** [K, N] -> [M, N]
       [B, M, K] ** [K, N] -> [B, M, N]
       [B, M, K] ** [B, K, N] -> [B, M, N]
-
-    Attributes:
-      compute_precision: The precision used for the matmul computation
-        (e.g., "bf16", "fp8", "f32"). Defaults to the input precision.
-      accumulation_precision: The precision used for accumulation.
-        Always "f32" for correctness when inputs are lower precision.
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs,
                        OptionalAttr<StrAttr>:$compute_precision,
                        OptionalAttr<StrAttr>:$accumulation_precision);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::llvm::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::std::optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -220,7 +232,7 @@ def ExpOp : JulesOp<"exp", [Pure, SameOperandsAndResultType]> {
 // Reduction operations
 //===----------------------------------------------------------------------===//
 
-def MeanOp : JulesOp<"mean", [Pure]> {
+def MeanOp : JulesOp<"mean", [Pure, InferTypeOpInterface]> {
   let summary = "Mean reduction";
   let description = [{
     Computes the mean of all elements in a tensor, producing a scalar tensor.
@@ -228,9 +240,19 @@ def MeanOp : JulesOp<"mean", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::llvm::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::std::optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
-def SumOp : JulesOp<"sum", [Pure]> {
+def SumOp : JulesOp<"sum", [Pure, InferTypeOpInterface]> {
   let summary = "Sum reduction";
   let description = [{
     Computes the sum of all elements in a tensor, producing a scalar tensor.
@@ -238,6 +260,16 @@ def SumOp : JulesOp<"sum", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::llvm::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::std::optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -311,14 +343,14 @@ def GradOp : JulesOp<"grad"> {
   }];
   let arguments = (ins AnyType:$fn, StrAttr:$diff_var);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$fn `,` $diff_var attr-dict `:` type($result)";
+  let assemblyFormat = "$fn `,` $diff_var attr-dict `:` type($fn) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
 // Tensor manipulation
 //===----------------------------------------------------------------------===//
 
-def TransposeOp : JulesOp<"transpose", [Pure]> {
+def TransposeOp : JulesOp<"transpose", [Pure, InferTypeOpInterface]> {
   let summary = "Tensor transpose";
   let description = [{
     Transposes a 2D tensor by swapping its dimensions.
@@ -326,6 +358,16 @@ def TransposeOp : JulesOp<"transpose", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::llvm::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::std::optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 def ReshapeOp : JulesOp<"reshape", [Pure]> {
@@ -348,7 +390,7 @@ def ConcatOp : JulesOp<"concat", [Pure]> {
   }];
   let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$axis);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$inputs `,` $axis attr-dict `:` type($result)";
+  let assemblyFormat = "$inputs `,` $axis attr-dict `:` type($inputs) `->` type($result)";
 }
 
 def SliceOp : JulesOp<"slice", [Pure]> {
@@ -361,7 +403,7 @@ def SliceOp : JulesOp<"slice", [Pure]> {
                        I64ArrayAttr:$limit_indices,
                        I64ArrayAttr:$strides);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$input `[` $start_indices `:` $limit_indices `:` $strides `]` attr-dict `:` type($result)";
+  let assemblyFormat = "$input `[` $start_indices `:` $limit_indices `:` $strides `]` attr-dict `:` type($input) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -375,7 +417,7 @@ def SelectOp : JulesOp<"select", [Pure]> {
   }];
   let arguments = (ins AnyType:$condition, AnyType:$true_value, AnyType:$false_value);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$condition `,` $true_value `,` $false_value attr-dict `:` type($result)";
+  let assemblyFormat = "$condition `,` $true_value `,` $false_value attr-dict `:` type($condition) `,` type($true_value) `,` type($false_value) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -389,7 +431,7 @@ def CmpOp : JulesOp<"cmp", [Pure]> {
   }];
   let arguments = (ins AnyType:$lhs, AnyType:$rhs, StrAttr:$comparison_direction);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$lhs `,` $rhs `,` $comparison_direction attr-dict `:` type($result)";
+  let assemblyFormat = "$lhs `,` $rhs `,` $comparison_direction attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -424,7 +466,7 @@ def PadOp : JulesOp<"pad", [Pure]> {
                        I64ArrayAttr:$padding_high,
                        I64ArrayAttr:$interior_padding);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "$input `,` $padding_value `low` $padding_low `high` $padding_high `interior` $interior_padding attr-dict `:` type($result)";
+  let assemblyFormat = "$input `,` $padding_value `low` $padding_low `high` $padding_high `interior` $interior_padding attr-dict `:` type($input) `,` type($padding_value) `->` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
@@ -458,14 +500,14 @@ def ReduceOp : JulesOp<"reduce", [Pure]> {
   let arguments = (ins AnyType:$input, AnyType:$init_value, I64ArrayAttr:$dimensions);
   let results = (outs AnyType:$result);
   let regions = (region AnyRegion:$body);
-  let assemblyFormat = "$input `,` $init_value `dims` $dimensions attr-dict `:` type($input) $body";
+  let assemblyFormat = "$input `,` $init_value `dims` $dimensions attr-dict `:` type($input) `,` type($init_value) `->` type($result) $body";
 }
 
 //===----------------------------------------------------------------------===//
 // Control flow
 //===----------------------------------------------------------------------===//
 
-def WhileOp : JulesOp<"while", [HasParent<"func::FuncOp">]> {
+def WhileOp : JulesOp<"while"> {
   let summary = "While loop with carried variables";
   let description = [{
     Executes a while loop: while(condition(carried_vars)) { body(carried_vars) }
@@ -485,7 +527,7 @@ def WhileOp : JulesOp<"while", [HasParent<"func::FuncOp">]> {
 // Parallel execution
 //===----------------------------------------------------------------------===//
 
-def ParallelOp : JulesOp<"parallel", [HasParent<"func::FuncOp">]> {
+def ParallelOp : JulesOp<"parallel"> {
   let summary = "Data-parallel execution primitive";
   let description = [{
     Executes a computation in parallel over a range of indices.
@@ -514,14 +556,6 @@ def FakeQuantOp : JulesOp<"fake_quant", [Pure]> {
     Compute: round(input / scale + zero_point) * scale - zero_point * scale
 
     In inference mode, this op is replaced with actual int8 CastOp + MatMulInt8.
-
-    Attributes:
-      scale:       The quantization scale factor (float64)
-      zero_point:  The quantization zero point (int64)
-      num_bits:    The bit width of the quantized type (int32, default 8)
-      per_channel: Whether to use per-channel quantization (bool, default false)
-      scales:      Per-channel scale factors (array of float64, used when per_channel=true)
-      zero_points: Per-channel zero points (array of int64, used when per_channel=true)
   }];
   let arguments = (ins AnyType:$input,
                        F64Attr:$scale,

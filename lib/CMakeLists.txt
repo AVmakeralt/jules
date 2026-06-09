@@ -1,4 +1,4 @@
-//===- CMakeLists.txt - Jules Library Build --------------------------------===//
+# CMakeLists.txt - Jules Library Build
 
 # Collect all source files for the Jules library.
 file(GLOB_RECURSE JULES_SOURCES
@@ -18,6 +18,7 @@ target_link_libraries(julesLib PUBLIC Threads::Threads)
 target_include_directories(julesLib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_BINARY_DIR}/../include
+  ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # Link against MLIR/LLVM if enabled.
@@ -73,7 +74,20 @@ if(JULES_ENABLE_MLIR)
   mlir_tablegen(JulesOpsDialect.h.inc -gen-dialect-decls -dialect=jules)
   mlir_tablegen(JulesOpsTypes.h.inc -gen-typedef-decls)
   mlir_tablegen(JulesOpsTypes.cpp.inc -gen-typedef-defs)
+  mlir_tablegen(JulesOpsDialect.cpp.inc -gen-dialect-defs -dialect=jules)
 
   add_public_tablegen_target(JulesOpsIncGen)
   add_dependencies(julesLib JulesOpsIncGen)
+
+  # Copy generated .inc files to the include directory so they can be found
+  # via the "jules/Dialect/*.inc" include path.
+  set(GEN_INC_DIR ${CMAKE_CURRENT_BINARY_DIR}/../include/jules/Dialect)
+  file(MAKE_DIRECTORY ${GEN_INC_DIR})
+  foreach(INC_FILE JulesOps.h.inc JulesOps.cpp.inc JulesOpsDialect.h.inc JulesOpsDialect.cpp.inc JulesOpsTypes.h.inc JulesOpsTypes.cpp.inc)
+    add_custom_command(TARGET JulesOpsIncGen POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_BINARY_DIR}/${INC_FILE}
+        ${GEN_INC_DIR}/${INC_FILE}
+    )
+  endforeach()
 endif()
