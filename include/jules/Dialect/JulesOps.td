@@ -36,6 +36,10 @@ def Jules_Dialect : Dialect {
   let cppNamespace = "::jules";
   let hasConstantMaterializer = 1;
   let useDefaultTypePrinterParser = 0;
+  let extraClassDeclaration = [{
+    Type parseType(DialectAsmParser &parser) const override;
+    void printType(Type type, DialectAsmPrinter &os) const override;
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -102,6 +106,15 @@ def MulOp : JulesOp<"mul", [NoSideEffect, Commutative, InferTypeOpInterface]> {
   let results = (outs AnyType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   let hasFolder = 1;
+  let extraClassDeclaration = [{
+    static ::mlir::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::llvm::Optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 def DivOp : JulesOp<"div", [NoSideEffect]> {
@@ -152,6 +165,15 @@ def MatMulOp : JulesOp<"matmul", [NoSideEffect, InferTypeOpInterface]> {
                        OptionalAttr<StrAttr>:$accumulation_precision);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::mlir::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::llvm::Optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -221,6 +243,15 @@ def MeanOp : JulesOp<"mean", [NoSideEffect, InferTypeOpInterface]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::mlir::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::llvm::Optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 def SumOp : JulesOp<"sum", [NoSideEffect, InferTypeOpInterface]> {
@@ -231,6 +262,15 @@ def SumOp : JulesOp<"sum", [NoSideEffect, InferTypeOpInterface]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::mlir::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::llvm::Optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -319,6 +359,15 @@ def TransposeOp : JulesOp<"transpose", [NoSideEffect, InferTypeOpInterface]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` type($input) `->` type($result)";
+  let extraClassDeclaration = [{
+    static ::mlir::LogicalResult inferReturnTypes(
+        ::mlir::MLIRContext *context,
+        ::llvm::Optional<::mlir::Location> location,
+        ::mlir::ValueRange operands,
+        ::mlir::DictionaryAttr attributes,
+        ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
+  }];
 }
 
 def ReshapeOp : JulesOp<"reshape", [NoSideEffect]> {
