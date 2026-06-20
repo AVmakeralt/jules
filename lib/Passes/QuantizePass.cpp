@@ -204,25 +204,14 @@ Operation *createPerChannelFakeQuantOp(OpBuilder &builder, Location loc,
 struct QuantizePass
     : public PassWrapper<QuantizePass, OperationPass<ModuleOp>> {
 
-  llvm::cl::opt<bool> quantizeWeights{
-      "quantize-weights",
-      llvm::cl::desc("Quantize matmul weights with fake_quant"),
-      llvm::cl::init(true)};
-
-  llvm::cl::opt<bool> quantizeActivations{
-      "quantize-activations",
-      llvm::cl::desc("Quantize activation outputs with fake_quant"),
-      llvm::cl::init(false)};
-
-  llvm::cl::opt<unsigned> numBits{
-      "quantize-bits",
-      llvm::cl::desc("Number of bits for quantization"),
-      llvm::cl::init(8)};
-
-  llvm::cl::opt<bool> perChannel{
-      "quantize-per-channel",
-      llvm::cl::desc("Use per-channel quantization for weights"),
-      llvm::cl::init(true)};
+  // Note: these were llvm::cl::opt<T> members, but those are non-copyable
+  // which made QuantizePass non-copyable (required by PassWrapper).
+  // Stored as plain members now; programmatic configuration is done via
+  // the public setters below.
+  bool quantizeWeights = true;
+  bool quantizeActivations = false;
+  unsigned numBits = 8;
+  bool perChannel = true;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();

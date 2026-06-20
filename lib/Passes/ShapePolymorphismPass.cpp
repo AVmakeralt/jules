@@ -177,7 +177,10 @@ struct ShapeConstraint {
    /// compression. Without this, a chain A→B→C produces {B:[A], C:[B]}
   /// instead of {C:[A,B]}.
   llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
-  getEqualityClasses() const {
+  getEqualityClasses() {
+    // Note: non-const because findRoot() does path-compression on
+    // equalityClass. Callers that need a const view should make a copy
+    // of the ShapeConstraint first.
     llvm::DenseMap<StringAttr, llvm::SmallVector<StringAttr, 4>>
         classes;
     for (auto &kv : equalityClass) {
@@ -650,7 +653,7 @@ private:
       for (auto &[rep, members] : classes) {
         if (members.size() > 1) {
           // Skip static dimensions.
-          if (rep.starts_with("static_")) continue;
+          if (rep.getValue().starts_with("static_")) continue;
 
           if (!first) os << "; ";
           first = false;
@@ -690,8 +693,7 @@ private:
           !it->second.dimNames.empty()) {
         SmallVector<Attribute, 4> dimNameAttrs;
         for (auto &name : it->second.dimNames) {
-          dimNameAttrs.push_back(
-              StringAttr::get(funcOp.getContext(), name));
+          dimNameAttrs.push_back(name);
         }
         funcOp.setArgAttr(argIdx, "jules.dim_names",
                           ArrayAttr::get(funcOp.getContext(), dimNameAttrs));
@@ -780,7 +782,8 @@ private:
   // while the attribute is still referenced by the IR).
 
   StringAttr allocateDimName(const std::string &name) {
-    return StringAttr::get(allocatedDimNames_.insert(name).first->getKey());
+    auto *ctx = getOperation()->getContext();
+    return StringAttr::get(ctx, allocatedDimNames_.insert(name).first->getKey());
   }
 
   /// Persistent storage for allocated dimension name strings.

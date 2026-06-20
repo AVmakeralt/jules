@@ -204,20 +204,14 @@ struct MixedPrecisionPass
     : public PassWrapper<MixedPrecisionPass, OperationPass<ModuleOp>> {
 
   MixedPrecisionPass() = default;
-  // Note: custom constructor with std::string removed because Option<T> is
-  // non-copyable. Use the pass option mechanism to set target-compute-precision.
+  explicit MixedPrecisionPass(std::string targetPrecision)
+      : targetComputePrecision_(std::move(targetPrecision)) {}
 
-  /// Pass option: target compute precision ("bf16" or "fp8").
-  Option<std::string> targetComputePrecision_{
-      *this, "target-compute-precision",
-      llvm::cl::desc("Target compute precision for mixed precision (bf16 or fp8)"),
-      llvm::cl::init("bf16")};
-
-  /// Pass option: minimum number of ops to apply mixed precision.
-  Option<unsigned> minOpCountForMixedPrecision_{
-      *this, "min-op-count-for-mixed-precision",
-      llvm::cl::desc("Only apply mixed precision to functions with >= N ops"),
-      llvm::cl::init(5)};
+  /// Target compute precision ("bf16" or "fp8"). Stored as a plain member
+  /// because mlir::Pass::Option<T> is non-copyable, which prevents the
+  /// pass from being copy-constructible (required by PassWrapper).
+  std::string targetComputePrecision_ = "bf16";
+  unsigned minOpCountForMixedPrecision_ = 5;
 
   /// The accumulation precision is always f32 for correctness.
   static constexpr llvm::StringLiteral kAccumulationPrecision = "f32";
@@ -680,11 +674,5 @@ std::unique_ptr<Pass> jules::createMixedPrecisionPass() {
 }
 
 std::unique_ptr<Pass> jules::createMixedPrecisionPass(std::string targetPrecision) {
-  // The custom constructor was removed because Option<T> is non-copyable.
-  // Set the option via the pass manager instead.
-  auto pass = std::make_unique<MixedPrecisionPass>();
-  // Note: targetPrecision is ignored; the pass option must be set via the
-  // pass manager when adding the pass.
-  (void)targetPrecision;
-  return pass;
+  return std::make_unique<MixedPrecisionPass>(std::move(targetPrecision));
 }

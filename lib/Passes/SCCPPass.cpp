@@ -93,6 +93,12 @@ public:
       : kind_(Kind::Constant), scalarValue_(val), isScalar_(true),
         scalarType_(type) {}
 
+  /// Construct a scalar constant lattice value without an explicit type
+  /// (used by evaluateScalarOperation where the result type is implied by
+  /// the op's result type, set later by the caller if needed).
+  TensorLatticeValue(double val)
+      : kind_(Kind::Constant), scalarValue_(val), isScalar_(true) {}
+
   /// Construct a tensor constant lattice value from DenseFPElementsAttr.
   TensorLatticeValue(DenseFPElementsAttr tensorValue)
       : kind_(Kind::Constant), tensorValue_(tensorValue), isScalar_(false) {}
@@ -290,7 +296,7 @@ DenseFPElementsAttr elementWiseUnary(DenseFPElementsAttr input,
     return DenseFPElementsAttr::get(resultType, result);
   }
 
-  for (auto &val : input) {
+  for (auto val : input) {
     resultValues.push_back(fn(val));
   }
 
@@ -316,6 +322,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    builder_ = std::make_unique<OpBuilder>(&getContext());
 
     // Run SCCP on each function in the module.
     module.walk([&](func::FuncOp funcOp) {
@@ -417,7 +424,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
               // Reshape the values.
               SmallVector<APFloat, 64> elements;
               elements.reserve(tensorVal.getNumElements());
-              for (auto &elem : tensorVal) {
+              for (auto elem : tensorVal) {
                 elements.push_back(elem);
               }
               finalVal = DenseFPElementsAttr::get(tensorType, elements);
@@ -501,7 +508,9 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
         auto shapedType = denseInt.getType().dyn_cast<RankedTensorType>();
         if (shapedType && shapedType.getRank() == 0 &&
             denseInt.getNumElements() == 1) {
-          double scalarVal = static_cast<double>(denseInt.begin()->getSExtValue());
+          // MLIR 19 returns APInt by value from iterator; use *it instead of it->
+          auto intVal = *denseInt.begin();
+          double scalarVal = static_cast<double>(intVal.getSExtValue());
           return TensorLatticeValue(scalarVal, shapedType.getElementType());
         }
         // For now, int tensors → Bottom (we focus on float tensor folding).
@@ -517,10 +526,12 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
         if (resultType.getRank() == 0) {
           return TensorLatticeValue(0.0, resultType.getElementType());
         }
-        APFloat zero(resultType.getElementType()
+        APFloat zero(0.0);
+        bool zero_loses;
+        zero.convert(resultType.getElementType()
                          .cast<FloatType>()
                          .getFloatSemantics(),
-                     0);
+                     APFloat::rmNearestTiesToEven, &zero_loses);
         return TensorLatticeValue(makeSplatTensor(resultType, zero));
       }
       // Fallback: scalar 0.
@@ -535,10 +546,12 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
         if (resultType.getRank() == 0) {
           return TensorLatticeValue(1.0, resultType.getElementType());
         }
-        APFloat one(resultType.getElementType()
+        APFloat one(1.0);
+        bool one_loses;
+        one.convert(resultType.getElementType()
                         .cast<FloatType>()
                         .getFloatSemantics(),
-                    1);
+                    APFloat::rmNearestTiesToEven, &one_loses);
         return TensorLatticeValue(makeSplatTensor(resultType, one));
       }
       return TensorLatticeValue(1.0, defOp->getResult(0).getType());
@@ -558,7 +571,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           // Reshape: flatten all values and reshape to new type.
           SmallVector<APFloat, 64> elements;
           elements.reserve(inputTensor.getNumElements());
-          for (auto &elem : inputTensor) {
+          for (auto elem : inputTensor) {
             elements.push_back(elem);
           }
           auto reshaped = DenseFPElementsAttr::get(resultType, elements);
@@ -566,10 +579,12 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
         }
         if (inputIt->second.isScalarConstant()) {
           // Scalar input → splat the scalar into the reshape target.
-          APFloat val(resultType.getElementType()
+          APFloat val(inputIt->second.getScalarValue());
+          bool val_loses;
+          val.convert(resultType.getElementType()
                           .cast<FloatType>()
                           .getFloatSemantics(),
-                      inputIt->second.getScalarValue());
+                      APFloat::rmNearestTiesToEven, &val_loses);
           return TensorLatticeValue(makeSplatTensor(resultType, val));
         }
       }
@@ -599,7 +614,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           // Flatten input values.
           SmallVector<APFloat, 64> inputValues;
           inputValues.reserve(inputTensor.getNumElements());
-          for (auto &elem : inputTensor) {
+          for (auto elem : inputTensor) {
             inputValues.push_back(elem);
           }
 
@@ -789,10 +804,12 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
             op->getResult(0).getType().dyn_cast<RankedTensorType>();
         if (!resultType) return TensorLatticeValue::getBottom();
 
-        APFloat zero(resultType.getElementType()
+        APFloat zero(0.0);
+        bool zero_loses;
+        zero.convert(resultType.getElementType()
                          .cast<FloatType>()
                          .getFloatSemantics(),
-                     0);
+                     APFloat::rmNearestTiesToEven, &zero_loses);
         auto result = elementWiseUnary(
             operands[0].getTensorValue(), resultType,
             [&zero](const APFloat &v) -> APFloat {
@@ -848,7 +865,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
 
         double sum = 0.0;
         int64_t count = 0;
-        for (auto &elem : inputTensor) {
+        for (auto elem : inputTensor) {
           sum += elem.convertToDouble();
           ++count;
         }
@@ -862,7 +879,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           return TensorLatticeValue(mean,
                                      resultType.getElementType());
         }
-        return TensorLatticeValue(mean, builder_.getF32Type());
+        return TensorLatticeValue(mean, builder_->getF32Type());
       }
     }
 
@@ -871,7 +888,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
       if (operands[0].isTensorConstant()) {
         DenseFPElementsAttr inputTensor = operands[0].getTensorValue();
         double sum = 0.0;
-        for (auto &elem : inputTensor) {
+        for (auto elem : inputTensor) {
           sum += elem.convertToDouble();
         }
 
@@ -881,7 +898,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           return TensorLatticeValue(sum,
                                      resultType.getElementType());
         }
-        return TensorLatticeValue(sum, builder_.getF32Type());
+        return TensorLatticeValue(sum, builder_->getF32Type());
       }
     }
 
@@ -921,8 +938,10 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
     // Case 2: Tensor + scalar (broadcast scalar to tensor shape).
     if (lhs.isTensorConstant() && rhs.isScalarConstant()) {
       auto elemType = resultType.getElementType().cast<FloatType>();
-      APFloat scalarVal(elemType.getFloatSemantics(),
-                        rhs.getScalarValue());
+      APFloat scalarVal(rhs.getScalarValue());
+      bool scalarVal_loses;
+      scalarVal.convert(elemType.getFloatSemantics(),
+                        APFloat::rmNearestTiesToEven, &scalarVal_loses);
       auto rhsTensor = makeSplatTensor(resultType, scalarVal);
       auto result = elementWiseBinary(lhs.getTensorValue(),
                                        rhsTensor, resultType, fn);
@@ -932,8 +951,10 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
     // Case 3: Scalar + tensor (broadcast scalar to tensor shape).
     if (lhs.isScalarConstant() && rhs.isTensorConstant()) {
       auto elemType = resultType.getElementType().cast<FloatType>();
-      APFloat scalarVal(elemType.getFloatSemantics(),
-                        lhs.getScalarValue());
+      APFloat scalarVal(lhs.getScalarValue());
+      bool scalarVal_loses;
+      scalarVal.convert(elemType.getFloatSemantics(),
+                        APFloat::rmNearestTiesToEven, &scalarVal_loses);
       auto lhsTensor = makeSplatTensor(resultType, scalarVal);
       auto result = elementWiseBinary(lhsTensor,
                                        rhs.getTensorValue(),
@@ -994,7 +1015,9 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
 
 private:
   /// Builder used for creating constants during replacement.
-  OpBuilder builder_{getContext()};
+  /// Lazily created in runOnOperation because getContext() is not available
+  /// at member-initialization time.
+  std::unique_ptr<OpBuilder> builder_;
 };
 
 } // anonymous namespace

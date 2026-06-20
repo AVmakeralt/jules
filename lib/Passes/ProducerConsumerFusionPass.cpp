@@ -103,8 +103,12 @@ public:
     // Collect all members by leader.
     llvm::DenseMap<Operation*, llvm::SmallVector<Operation*, 8>> leaderToMembers;
     for (auto it = classes_.begin(); it != classes_.end(); ++it) {
-      Operation *leader = classes_.getLeaderValue(&*it);
-      leaderToMembers[leader].push_back(&*it);
+      if (!it->isLeader()) continue;
+      Operation *leader = it->getData();
+      // Collect all members of this leader's class
+      for (auto mi = classes_.member_begin(it); mi != classes_.member_end(); ++mi) {
+        leaderToMembers[leader].push_back(*mi);
+      }
     }
 
     for (auto &[leader, members] : leaderToMembers) {
@@ -384,8 +388,11 @@ struct ProducerConsumerFusionPass
 
       if (hasStableHLO) {
         // ── StableHLO fusion path ──────────────────────────────────────
-        createStableHLOFusion(builder, sortedOps, externalInputs,
-                              externalOutputs, externalOutputTypes, groupSet);
+        // NOTE: StableHLO support requires the stablehlo dialect to be
+        // available at compile time. When not available, we fall through
+        // to the Jules fusion path.
+        createJulesFusion(builder, sortedOps, externalInputs,
+                          externalOutputs, externalOutputTypes, groupSet);
       } else {
         // ── Jules fusion fallback path ─────────────────────────────────
         createJulesFusion(builder, sortedOps, externalInputs,
@@ -395,6 +402,9 @@ struct ProducerConsumerFusionPass
   }
 
   /// Create a stablehlo.fusion op wrapping the fusion group.
+  /// NOTE: Disabled because the stablehlo dialect is not available in this
+  /// build. The function body is wrapped in #if 0 to avoid compile errors.
+#if 0
   void createStableHLOFusion(OpBuilder &builder,
                               llvm::SmallVector<Operation*, 8> &sortedOps,
                               const llvm::SetVector<Value> &externalInputs,
@@ -485,6 +495,7 @@ struct ProducerConsumerFusionPass
       (*it)->erase();
     }
   }
+#endif // 0 (createStableHLOFusion disabled)
 
   /// Create a jules.fusion wrapper when StableHLO isn't available.
   /// This uses a jules.fusion_group attribute to mark the cluster and

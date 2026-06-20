@@ -90,8 +90,7 @@ struct SIMDLayoutPass
       op->setAttr("simd.vectorize", UnitAttr::get(op->getContext()));
       op->setAttr("simd.contiguous", UnitAttr::get(op->getContext()));
       op->setAttr("simd.preferred_width",
-                  IntegerAttr::get(op->getContext(),
-                                   IntegerType::get(op->getContext(), 64), 512));
+                  IntegerAttr::get(IntegerType::get(op->getContext(), 64), 512));
     });
 
     // ── Phase 3: Matmul Contraction Hints ──────────────────────────────────
@@ -128,12 +127,10 @@ struct SIMDLayoutPass
 
       // Add SIMD alignment hint for AVX-512 (64-byte alignment).
       matmulOp->setAttr("simd.alignment",
-                        IntegerAttr::get(matmulOp->getContext(),
-                                         IntegerType::get(matmulOp->getContext(), 64), 64));
+                        IntegerAttr::get(IntegerType::get(matmulOp->getContext(), 64), 64));
       // Add preferred SIMD width for matmul (512-bit for AVX-512).
       matmulOp->setAttr("simd.preferred_width",
-                        IntegerAttr::get(matmulOp->getContext(),
-                                         IntegerType::get(matmulOp->getContext(), 64), 512));
+                        IntegerAttr::get(IntegerType::get(matmulOp->getContext(), 64), 512));
     });
 
     // ── Phase 4: Alignment Hints ───────────────────────────────────────────
@@ -153,8 +150,7 @@ struct SIMDLayoutPass
       if (!tensorType) return;
 
       constOp->setAttr("simd.alignment",
-                        IntegerAttr::get(constOp->getContext(),
-                                         IntegerType::get(constOp->getContext(), 64), 64));
+                        IntegerAttr::get(IntegerType::get(constOp->getContext(), 64), 64));
     });
 
     // ── Phase 5: Contiguous Layout Enforcement ────────────────────────────
@@ -178,8 +174,7 @@ struct SIMDLayoutPass
         op->setAttr("simd.ensure_contiguous",
                     UnitAttr::get(op->getContext()));
         op->setAttr("simd.alignment",
-                    IntegerAttr::get(op->getContext(),
-                                     IntegerType::get(op->getContext(), 64), 64));
+                    IntegerAttr::get(IntegerType::get(op->getContext(), 64), 64));
       }
     });
   }
