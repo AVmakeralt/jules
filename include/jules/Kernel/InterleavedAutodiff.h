@@ -28,6 +28,7 @@
 #include <cblas.h>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -65,6 +66,19 @@ InterleavedMLPResult interleavedMLPForwardBackward(
     memset(db2, 0, N2 * sizeof(float));
     if (dX) memset(dX, 0, (size_t)M * K1 * sizeof(float));
 
+    // PERF (#3): Use per-thread full gradient buffers + tree-reduction at
+    // the end, instead of a critical section on every tile. The critical
+    // section serialized all threads on every tile of the weight-gradient
+    // accumulation, killing parallelism for large models.
+    //
+    // Set JULES_AD_LEGACY=1 to fall back to the old critical-section
+    // behavior (useful for A/B testing on hardware where the cache effects
+    // of full-size per-thread buffers hurt more than the critical section).
+    bool useLegacyAd = ([]() {
+        const char* env = std::getenv("JULES_AD_LEGACY");
+        return env && env[0] == '1';
+    })();
+
     float total_loss = 0.0f;
 
     size_t l1_budget = planner.cacheInfo().l1d_bytes * 3 / 4;
@@ -77,8 +91,19 @@ InterleavedMLPResult interleavedMLPForwardBackward(
 #endif
 
     // Multi-threaded: parallelize across tiles
-    // Each thread processes a tile independently, then atomically
-    // accumulates gradients into the shared gradient buffers.
+    // Each thread processes a tile independently, then accumulates
+    // gradients into the shared gradient buffers.
+    //
+    // PERF (#3): Two paths:
+    //   - Legacy (JULES_AD_LEGACY=1): per-tile local buffer + critical
+    //     section to accumulate into shared gradients. Serializes all
+    //     threads on every tile.
+    //   - New (default): per-thread FULL-SIZE gradient buffer, accumulated
+    //     across tiles, then tree-reduced at the end. Eliminates the
+    //     critical section. Uses more memory (4 buffers * thread count)
+    //     but enables full parallelism.
+    if (useLegacyAd) {
+    // ===== LEGACY PATH: per-tile critical section =====
     #pragma omp parallel for schedule(dynamic) reduction(+:total_loss) if(M > tile_m * 2)
     for (int ti = 0; ti < M; ti += tile_m) {
         int tm = std::min(tile_m, M - ti);
@@ -261,6 +286,151 @@ InterleavedMLPResult interleavedMLPForwardBackward(
             }
         }
     }
+    } else {
+    // ===== NEW PATH: per-thread full-size buffers + final reduction =====
+    // Each thread accumulates into its own full-size gradient buffers
+    // across all the tiles it processes. After the parallel region, a
+    // single critical section per thread reduces into the shared buffers.
+    // This eliminates (M/tile_m - num_threads) critical sections per
+    // thread compared to the legacy path.
+    #pragma omp parallel if(M > tile_m * 2)
+    {
+        // Per-thread full-size gradient buffers, allocated once and
+        // accumulated across all tiles this thread processes.
+        std::vector<float> tl_dW1(K1 * N1, 0.0f);
+        std::vector<float> tl_db1(N1, 0.0f);
+        std::vector<float> tl_dW2(N1 * N2, 0.0f);
+        std::vector<float> tl_db2(N2, 0.0f);
+        // Per-tile scratch (resized per tile, but reused buffer)
+        std::vector<float> tl_h_tile, tl_a_tile, tl_o_tile, tl_dL_do, tl_dL_da;
+
+        float local_loss = 0.0f;
+
+        #pragma omp for schedule(dynamic) nowait
+        for (int ti = 0; ti < M; ti += tile_m) {
+            int tm = std::min(tile_m, M - ti);
+
+            tl_h_tile.resize(tm * N1);
+            tl_a_tile.resize(tm * N1);
+            tl_o_tile.resize(tm * N2);
+            tl_dL_do.resize(tm * N2);
+            tl_dL_da.resize(tm * N1);
+
+            float* h_tile = tl_h_tile.data();
+            float* a_tile = tl_a_tile.data();
+            float* o_tile = tl_o_tile.data();
+            float* dL_do = tl_dL_do.data();
+            float* dL_da = tl_dL_da.data();
+
+            // ===== FORWARD PASS (one tile) =====
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        tm, N1, K1, 1.0f, X + ti * K1, K1, W1, N1,
+                        0.0f, h_tile, N1);
+#if defined(__AVX512F__)
+            for (int i = 0; i < tm; i++) {
+                int j = 0;
+                for (; j + 15 < N1; j += 16) {
+                    __m512 h = _mm512_loadu_ps(&h_tile[i * N1 + j]);
+                    __m512 b = _mm512_loadu_ps(&b1[j]);
+                    h = _mm512_add_ps(h, b);
+                    _mm512_storeu_ps(&a_tile[i * N1 + j], relu_zmm(h));
+                    _mm512_storeu_ps(&h_tile[i * N1 + j], h);
+                }
+                for (; j < N1; j++) {
+                    float val = h_tile[i * N1 + j] + b1[j];
+                    h_tile[i * N1 + j] = val;
+                    a_tile[i * N1 + j] = val > 0.0f ? val : 0.0f;
+                }
+            }
+#else
+            for (int i = 0; i < tm * N1; i++) {
+                h_tile[i] += b1[i % N1];
+                a_tile[i] = h_tile[i] > 0.0f ? h_tile[i] : 0.0f;
+            }
+#endif
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        tm, N2, N1, 1.0f, a_tile, N1, W2, N2,
+                        0.0f, o_tile, N2);
+            for (int i = 0; i < tm; i++)
+                for (int j = 0; j < N2; j++)
+                    o_tile[i * N2 + j] += b2[j];
+            memcpy(output + ti * N2, o_tile, tm * N2 * sizeof(float));
+
+            // ===== LOSS + GRADIENT =====
+            for (int i = 0; i < tm; i++) {
+                float* row = o_tile + i * N2;
+                float* grad_row = dL_do + i * N2;
+                float row_max = -FLT_MAX;
+                for (int j = 0; j < N2; j++) row_max = std::max(row_max, row[j]);
+                float row_sum = 0.0f;
+                for (int j = 0; j < N2; j++) {
+                    float e = expf(row[j] - row_max);
+                    grad_row[j] = e;
+                    row_sum += e;
+                }
+                for (int j = 0; j < N2; j++) grad_row[j] /= row_sum;
+                int target = targets[ti + i];
+                local_loss -= logf(grad_row[target] + 1e-10f);
+                grad_row[target] -= 1.0f;
+                for (int j = 0; j < N2; j++) grad_row[j] /= M;
+            }
+
+            // ===== BACKWARD PASS (one tile) =====
+            // Accumulate into per-thread gradient buffers (NOT zeroed per tile).
+            // cblas_sgemm with beta=1.0 accumulates into the existing buffer.
+            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                        N1, N2, tm, 1.0f, a_tile, N1, dL_do, N2,
+                        1.0f, tl_dW2.data(), N2);
+            for (int i = 0; i < tm; i++)
+                for (int j = 0; j < N2; j++)
+                    tl_db2[j] += dL_do[i * N2 + j];
+
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        tm, N1, N2, 1.0f, dL_do, N2, W2, N2,
+                        0.0f, dL_da, N1);
+#if defined(__AVX512F__)
+            for (int i = 0; i < tm * N1; i += 16) {
+                if (i + 15 < tm * N1) {
+                    __m512 da = _mm512_loadu_ps(&dL_da[i]);
+                    __m512 h  = _mm512_loadu_ps(&h_tile[i]);
+                    __mmask16 mask = _mm512_cmp_ps_mask(h, _mm512_setzero_ps(), _MM_CMPINT_GT);
+                    __m512 dh = _mm512_mask_blend_ps(mask, _mm512_setzero_ps(), da);
+                    _mm512_storeu_ps(&dL_da[i], dh);
+                } else {
+                    for (int j = i; j < tm * N1; j++)
+                        dL_da[j] = h_tile[j] > 0.0f ? dL_da[j] : 0.0f;
+                }
+            }
+#else
+            for (int i = 0; i < tm * N1; i++)
+                dL_da[i] = h_tile[i] > 0.0f ? dL_da[i] : 0.0f;
+#endif
+            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                        K1, N1, tm, 1.0f, X + ti * K1, K1, dL_da, N1,
+                        1.0f, tl_dW1.data(), N1);
+            for (int i = 0; i < tm; i++)
+                for (int j = 0; j < N1; j++)
+                    tl_db1[j] += dL_da[i * N1 + j];
+
+            if (dX) {
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            tm, K1, N1, 1.0f, dL_da, N1, W1, N1,
+                            1.0f, dX + ti * K1, K1);
+            }
+        }  // end omp for
+
+        // ===== FINAL REDUCTION: per-thread buffers -> shared =====
+        // One critical section per thread, instead of one per tile.
+        #pragma omp critical(jules_grad_final_reduce)
+        {
+            for (int i = 0; i < K1 * N1; i++) dW1[i] += tl_dW1[i];
+            for (int i = 0; i < N1; i++) db1[i] += tl_db1[i];
+            for (int i = 0; i < N1 * N2; i++) dW2[i] += tl_dW2[i];
+            for (int i = 0; i < N2; i++) db2[i] += tl_db2[i];
+            total_loss += local_loss;
+        }
+    }  // end omp parallel
+    }  // end if (useLegacyAd) else
 
     total_loss /= M;
 
