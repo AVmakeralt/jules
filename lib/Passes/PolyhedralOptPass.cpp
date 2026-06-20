@@ -397,8 +397,11 @@ struct PolyhedralOptPass
           Value tk = tileLoopK.getInductionVar();
 
           // Intra-tile loop i: for i = ti to min(ti+TM, M)
+          // MLIR 19 AffineForOp::build signature:
+          //   (ValueRange lbOperands, AffineMap lbMap,
+          //    ValueRange ubOperands, AffineMap ubMap, int64_t step, ...)
           auto intraLoopI = rewriter.create<affine::AffineForOp>(
-              loc, lbMap, ValueRange{ti}, ubMapI, ValueRange{ti}, 1);
+              loc, ValueRange{ti}, lbMap, ValueRange{ti}, ubMapI, 1);
           {
             OpBuilder::InsertionGuard guard4(rewriter);
             rewriter.setInsertionPointToStart(intraLoopI.getBody());
@@ -406,7 +409,7 @@ struct PolyhedralOptPass
 
             // Intra-tile loop j: for j = tj to min(tj+TN, N)
             auto intraLoopJ = rewriter.create<affine::AffineForOp>(
-                loc, lbMap, ValueRange{tj}, ubMapJ, ValueRange{tj}, 1);
+                loc, ValueRange{tj}, lbMap, ValueRange{tj}, ubMapJ, 1);
             {
               OpBuilder::InsertionGuard guard5(rewriter);
               rewriter.setInsertionPointToStart(intraLoopJ.getBody());
@@ -414,7 +417,7 @@ struct PolyhedralOptPass
 
               // Intra-tile loop k: for k = tk to min(tk+TK, K)
               auto intraLoopK = rewriter.create<affine::AffineForOp>(
-                  loc, lbMap, ValueRange{tk}, ubMapK, ValueRange{tk}, 1);
+                  loc, ValueRange{tk}, lbMap, ValueRange{tk}, ubMapK, 1);
               {
                 OpBuilder::InsertionGuard guard6(rewriter);
                 rewriter.setInsertionPointToStart(intraLoopK.getBody());
@@ -605,11 +608,11 @@ struct PolyhedralOptPass
     // Annotate backward matmuls with tiling hints.
     for (auto matmulOp : backwardMatmuls) {
       matmulOp->setAttr("polyhedral.backward_tile_m",
-                        IntegerAttr::get(ctx, tileSize.tileSizeM));
+                        IntegerAttr::get(IntegerType::get(ctx, 64), tileSize.tileSizeM));
       matmulOp->setAttr("polyhedral.backward_tile_n",
-                        IntegerAttr::get(ctx, tileSize.tileSizeN));
+                        IntegerAttr::get(IntegerType::get(ctx, 64), tileSize.tileSizeN));
       matmulOp->setAttr("polyhedral.backward_tile_k",
-                        IntegerAttr::get(ctx, tileSize.tileSizeK));
+                        IntegerAttr::get(IntegerType::get(ctx, 64), tileSize.tileSizeK));
       matmulOp->setAttr("polyhedral.backward_matmul",
                         UnitAttr::get(ctx));
     }
@@ -704,9 +707,9 @@ struct PolyhedralOptPass
                  op->getParentOp() != user->getParentOp())) {
               // Cross-iteration or cross-layer dependency.
               op->setAttr("polyhedral.backward_skew",
-                          IntegerAttr::get(ctx, 1));
+                          IntegerAttr::get(IntegerType::get(ctx, 64), 1));
               user->setAttr("polyhedral.backward_skew",
-                            IntegerAttr::get(ctx, 1));
+                            IntegerAttr::get(IntegerType::get(ctx, 64), 1));
               break;
             }
           }

@@ -43,6 +43,9 @@ namespace jules {
 /// Operations on LazyTensors record to the global trace.
 class LazyTensor {
 public:
+  /// Default constructor (for use in containers like std::tuple).
+  LazyTensor() = default;
+
   /// Create a lazy tensor from a trace value.
   explicit LazyTensor(TraceValueId traceId, GlobalTracer &tracer)
       : traceId_(traceId), tracer_(&tracer) {}

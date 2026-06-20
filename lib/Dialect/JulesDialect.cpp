@@ -24,6 +24,13 @@ using namespace mlir;
 
 // ── Dialect initialization ─────────────────────────────────────────────────
 
+::mlir::Operation *jules::JulesDialect::materializeConstant(
+    ::mlir::OpBuilder &builder, ::mlir::Attribute value,
+    ::mlir::Type type, ::mlir::Location loc) {
+  // Build a jules.constant op from the attribute and type.
+  return builder.create<::jules::ConstantOp>(loc, value, type);
+}
+
 void jules::JulesDialect::initialize() {
   addOperations<
 #define GET_OP_LIST

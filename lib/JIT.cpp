@@ -578,7 +578,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
   pm.addPass(createCSEPass());
 
   // Lower to StableHLO.
-  pm.addPass(createJulesToStableHLOLoweringPass());
+  if (auto p = createJulesToStableHLOLoweringPass()) pm.addPass(std::move(p));
 
   if (failed(pm.run(module))) {
     diag_.error(SourceLocation{}, "Tier 2 MLIR compilation failed for trace");

@@ -162,9 +162,9 @@ private:
                             IRRewriter &rewriter) {
     auto resultType = op.getResult().getType();
     Value constValue;
-    if (auto tensorType = resultType.dyn_cast<RankedTensorType>()) {
+    if (auto tensorType = resultType.template dyn_cast<RankedTensorType>()) {
       // Create a splat dense attribute for tensor types.
-      auto elemType = tensorType.getElementType().cast<FloatType>();
+      auto elemType = tensorType.getElementType().template cast<FloatType>();
       APFloat apValue(value);
       bool losingInfo;
       apValue.convert(elemType.getFloatSemantics(),
@@ -173,13 +173,13 @@ private:
       constValue =
           rewriter.create<ConstantOp>(op.getLoc(), denseAttr, denseAttr.getType()).getResult();
     } else {
-      auto floatType = resultType.isa<FloatType>()
-                            ? resultType.cast<FloatType>()
+      auto floatType = resultType.template isa<FloatType>()
+                            ? resultType.template cast<FloatType>()
                             : rewriter.getF64Type();
       constValue = rewriter
                        .create<ConstantOp>(
                            op.getLoc(),
-                           rewriter.getFloatAttr(floatType, value))
+                           rewriter.getFloatAttr(floatType, value), floatType)
                        .getResult();
     }
     rewriter.replaceOp(op, constValue);

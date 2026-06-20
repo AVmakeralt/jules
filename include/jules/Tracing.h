@@ -290,6 +290,7 @@ public:
 
   /// Get the active trace.
   ActiveTrace &getActiveTrace() { return activeTrace_; }
+  const ActiveTrace &getActiveTrace() const { return activeTrace_; }
 
   /// Begin a new trace (clears any existing trace).
   void beginTrace();

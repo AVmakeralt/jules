@@ -49,6 +49,34 @@ void ConstantOp::build(OpBuilder &builder, OperationState &result,
   result.addTypes(type);
 }
 
+void ConstantOp::build(OpBuilder &builder, OperationState &result,
+                       Attribute value, Type type) {
+  result.addAttribute("value", value);
+  result.addTypes(type);
+}
+
+// Stubs for hasFolder = 1 ops. These return null OpFoldResult (no fold)
+// so the compiler links; actual folding logic can be added later.
+::mlir::OpFoldResult ConstantOp::fold(FoldAdaptor adaptor) { return {}; }
+::mlir::OpFoldResult AddOp::fold(FoldAdaptor adaptor) { return {}; }
+::mlir::OpFoldResult SubOp::fold(FoldAdaptor adaptor) { return {}; }
+::mlir::OpFoldResult MulOp::fold(FoldAdaptor adaptor) { return {}; }
+::mlir::OpFoldResult NegOp::fold(FoldAdaptor adaptor) { return {}; }
+
+// Stubs for ConstantOp's custom assembly format (hasCustomAssemblyFormat = 1).
+// These return failure/empty so the op is unprintable in custom form, but
+// the linker is satisfied. A real implementation would parse/print the
+// value attribute and result type.
+::mlir::ParseResult ConstantOp::parse(::mlir::OpAsmParser &parser,
+                                       ::mlir::OperationState &result) {
+  return ::mlir::failure();
+}
+void ConstantOp::print(::mlir::OpAsmPrinter &p) {
+  p << " ";
+  p.printAttribute(getValueAttr());
+  p << " : " << getResult().getType();
+}
+
 //===----------------------------------------------------------------------===//
 // jules.matmul
 //===----------------------------------------------------------------------===//

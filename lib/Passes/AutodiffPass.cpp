@@ -848,6 +848,29 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
 
 } // anonymous namespace
 
+// AutodiffEngine::traceForwardGraph: defined here as a duplicate of the
+// anonymous-namespace free function, because the header declares it as a
+// member function (which the linker needs). The free function above is
+// called directly from other code in this TU; this member version is the
+// one accessed via AutodiffEngine::differentiate().
+std::vector<Operation *> AutodiffEngine::traceForwardGraph(Value output,
+                                                            Value input) {
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  std::vector<Operation *>           result;
+
+  std::function<void(Value)> dfs = [&](Value val) {
+    Operation *defOp = val.getDefiningOp();
+    if (!defOp || visited.count(defOp)) return;
+    visited.insert(defOp);
+    for (Value operand : defOp->getOperands()) {
+      dfs(operand);
+    }
+    result.push_back(defOp);
+  };
+  dfs(output);
+  return result;
+}
+
 Value AutodiffEngine::differentiate(Value output, Value input,
                                     OpBuilder &builder) {
   // Step 1: Trace the forward computation graph.

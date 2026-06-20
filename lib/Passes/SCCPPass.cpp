@@ -265,12 +265,12 @@ DenseFPElementsAttr elementWiseBinary(DenseFPElementsAttr lhs,
 
   if (lhsSplat) {
     APFloat lhsVal = *lhsIt;
-    for (auto &rhsVal : rhs) {
+    for (auto rhsVal : rhs) {
       resultValues.push_back(fn(lhsVal, rhsVal));
     }
   } else if (rhsSplat) {
     APFloat rhsVal = *rhsIt;
-    for (auto &lhsVal : lhs) {
+    for (auto lhsVal : lhs) {
       resultValues.push_back(fn(lhsVal, rhsVal));
     }
   } else {
@@ -314,15 +314,13 @@ DenseFPElementsAttr makeSplatTensor(RankedTensorType type, APFloat value) {
 struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
   /// Maximum number of elements in a tensor to consteval.
   /// Tensors larger than this will remain as Bottom to avoid
-  /// compile-time memory and CPU explosion.
-  llvm::cl::opt<unsigned> maxConstevalElements{
-      "max-consteval-elements",
-      llvm::cl::desc("Maximum tensor elements for consteval folding"),
-      llvm::cl::init(1024)};
+  /// compile-time memory and CPU explosion. Stored as plain member
+  /// (cl::opt is non-copyable, which would make SCCPPass non-copyable).
+  unsigned maxConstevalElements = 1024;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    builder_ = std::make_unique<OpBuilder>(&getContext());
+    builder_ = std::make_shared<OpBuilder>(&getContext());
 
     // Run SCCP on each function in the module.
     module.walk([&](func::FuncOp funcOp) {
@@ -491,8 +489,9 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
         if (shapedType && withinConstevalBudget(shapedType)) {
           // If it's a 0-d tensor (scalar tensor), extract the scalar.
           if (shapedType.getRank() == 0 && denseFP.getNumElements() == 1) {
-            double scalarVal =
-                denseFP.begin()->convertToDouble();
+            // MLIR 19 returns APFloat by value from iterator; use *it instead of it->
+            auto floatVal = *denseFP.begin();
+            double scalarVal = floatVal.convertToDouble();
             return TensorLatticeValue(scalarVal, shapedType.getElementType());
           }
           return TensorLatticeValue(denseFP);
@@ -1016,8 +1015,9 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
 private:
   /// Builder used for creating constants during replacement.
   /// Lazily created in runOnOperation because getContext() is not available
-  /// at member-initialization time.
-  std::unique_ptr<OpBuilder> builder_;
+  /// at member-initialization time. Uses shared_ptr (not unique_ptr) so the
+  /// pass remains copyable (PassWrapper requires copy).
+  std::shared_ptr<OpBuilder> builder_;
 };
 
 } // anonymous namespace

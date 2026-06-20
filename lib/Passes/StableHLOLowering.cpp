@@ -31,6 +31,11 @@
 using namespace mlir;
 using namespace jules;
 
+// NOTE: The StableHLO dialect is not available in this build environment.
+// The entire implementation below is wrapped in #if 0 to allow the file to
+// compile. When StableHLO is available, remove the #if 0 / #endif pair.
+#if 0
+
 //===----------------------------------------------------------------------===//
 // Type converter: Jules types -> StableHLO types
 //===----------------------------------------------------------------------===//
@@ -1306,6 +1311,17 @@ struct JulesToStableHLOLoweringPass
 
 } // anonymous namespace
 
+#endif // 0 (StableHLO not available)
+
+// Stub factory function — returns null when StableHLO is not available.
+// When StableHLO is available, remove the #if 0 above and uncomment the
+// real factory below.
+std::unique_ptr<Pass> jules::createJulesToStableHLOLoweringPass() {
+  return nullptr;
+}
+
+#if 0
 std::unique_ptr<Pass> jules::createJulesToStableHLOLoweringPass() {
   return std::make_unique<JulesToStableHLOLoweringPass>();
 }
+#endif

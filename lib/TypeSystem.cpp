@@ -55,7 +55,9 @@ bool TypeChecker::checkProgram(Program &program) {
   // Second pass: type-check each function body.
   pushScope();
   for (auto &fn : program.getFunctions()) {
-    fn->accept(*this);
+    // FunctionDecl is not an ASTNode, so it has no accept(); call
+    // visitFunctionDecl directly.
+    visitFunctionDecl(*fn);
   }
   popScope();
 
@@ -177,11 +179,8 @@ void TypeChecker::visitTensorLiteralExpr(TensorLiteralExpr &expr) {
 }
 
 void TypeChecker::visitBinaryExpr(BinaryExpr &expr) {
-  expr.getLHS()->accept(*this);  // Note: we need to cast away const for visitor
-  // We use a const_cast here because our visitor pattern requires non-const refs,
-  // but our AST provides const accessors. In a production compiler we'd fix the
-  // const-correctness; for now we use the pattern of calling accept on sub-expressions
-  // through the visitor, and the resolved type is set as a side effect.
+  // getLHS()/getRHS() return const Expr*; const_cast to call accept()
+  // (visitor pattern requires non-const this for in-place mutation).
   const_cast<Expr *>(expr.getLHS())->accept(*this);
   const_cast<Expr *>(expr.getRHS())->accept(*this);
 

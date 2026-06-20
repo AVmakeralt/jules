@@ -284,7 +284,7 @@ bool Compiler::lowerToStableHLO() {
   if (!mlirModule_) return false;
 
   PassManager pm(mlirContext_.get());
-  pm.addPass(createJulesToStableHLOLoweringPass());
+  if (auto p = createJulesToStableHLOLoweringPass()) pm.addPass(std::move(p));
   pm.addPass(createCanonicalizerPass());
 
   if (failed(pm.run(*mlirModule_))) {

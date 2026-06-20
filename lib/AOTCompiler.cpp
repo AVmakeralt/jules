@@ -247,7 +247,7 @@ bool AOTCompiler::injectTelemetry(ModuleOp module) {
 
 bool AOTCompiler::lowerToStableHLO(ModuleOp module) {
   PassManager pm(mlirContext_.get());
-  pm.addPass(createJulesToStableHLOLoweringPass());
+  if (auto p = createJulesToStableHLOLoweringPass()) pm.addPass(std::move(p));
 
   if (failed(pm.run(module))) {
     diag_.error(SourceLocation{}, "AOT: StableHLO lowering failed");

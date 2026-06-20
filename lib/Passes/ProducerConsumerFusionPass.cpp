@@ -600,7 +600,7 @@ struct ProducerConsumerFusionPass
 
     // Replace external uses with fusion outputs.
     for (size_t i = 0; i < externalOutputs.size(); ++i) {
-      externalOutputs[i].replaceAllUsesWith(fusionOp->getResult(i));
+      Value(externalOutputs[i]).replaceAllUsesWith(fusionOp->getResult(i));
     }
 
     // Erase original operations in reverse order.

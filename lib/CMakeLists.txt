@@ -15,6 +15,14 @@ add_library(julesLib STATIC ${JULES_SOURCES})
 find_package(Threads REQUIRED)
 target_link_libraries(julesLib PUBLIC Threads::Threads)
 
+# BLAS / CBLAS for cblas_sgemm (used by FusedKernels.h and PJRT.cpp)
+find_library(BLAS_LIB NAMES blas PATHS /home/z/my-project/mlir-prefix/usr/lib/x86_64-linux-gnu/blas /usr/lib/x86_64-linux-gnu/blas)
+if(BLAS_LIB)
+  target_link_libraries(julesLib PUBLIC ${BLAS_LIB})
+else()
+  message(WARNING "BLAS not found — cblas_sgemm symbols will be unresolved")
+endif()
+
 target_include_directories(julesLib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_BINARY_DIR}/../include
@@ -40,7 +48,8 @@ if(JULES_ENABLE_MLIR)
     MLIRArithDialect
     MLIRBufferizationDialect
     MLIRMathDialect
-    MLIROpenMP
+    MLIROpenMPDialect
+    MLIROpenMPToLLVM
     # LLVM Backend: conversion + JIT libraries
     MLIRArithToLLVM
     MLIRFuncToLLVM
@@ -50,9 +59,9 @@ if(JULES_ENABLE_MLIR)
     MLIRMathToLLVM
     MLIRIndexToLLVM
     MLIRVectorToLLVM
-    MLIRLLVMCommon
+    MLIRLLVMCommonConversion
     MLIRTargetLLVMIRExport
-    MLIRBuiltinToLLVMIR
+    MLIRBuiltinToLLVMIRTranslation
     LLVMOrcJIT
     LLVMCore
     LLVMSupport
