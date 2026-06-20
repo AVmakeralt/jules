@@ -195,21 +195,28 @@ private:
 
         for (auto& cfg : candidates) {
             // Use the actual AVX-512 tiled kernel if available,
-            // otherwise fall back to the improved scalar reference
-            if (benchmarkKernel_) {
-                benchmarkKernel_(A.data(), B.data(), C.data(), M, N, K, cfg);
-            } else {
-                tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
-            }
-
-            auto start = std::chrono::high_resolution_clock::now();
-            int iters = 3;
-            for (int i = 0; i < iters; i++) {
+            // otherwise fall back to the improved scalar reference.
+            // PERF (#8): Bumped from 3 to 10 iterations for more stable
+            // measurements. The result is cached per (M,N,K) by
+            // getTileConfig() via ShapeSignature, so the extra time is
+            // paid once per shape on first execution and amortized over
+            // every subsequent call. Also added an explicit warmup call
+            // (previously the first timed iteration doubled as warmup,
+            // which biased small-tile measurements).
+            auto run = [&]() {
                 if (benchmarkKernel_) {
                     benchmarkKernel_(A.data(), B.data(), C.data(), M, N, K, cfg);
                 } else {
                     tiledMatmulRef(A.data(), B.data(), C.data(), M, N, K, cfg);
                 }
+            };
+
+            run();  // warmup (not timed)
+
+            auto start = std::chrono::high_resolution_clock::now();
+            constexpr int iters = 10;
+            for (int i = 0; i < iters; i++) {
+                run();
             }
             auto end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count() / iters;

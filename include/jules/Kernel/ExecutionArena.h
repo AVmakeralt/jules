@@ -99,7 +99,30 @@ public:
         : maxSize_(maxSize), offset_(0), highWaterMark_(0) {
         buffer_ = static_cast<char*>(aligned_alloc(64, maxSize_));
         if (!buffer_) throw std::bad_alloc();
+        // PERF (#7): First-touch NUMA placement. On multi-socket systems,
+        // memset from this thread pages in the buffer on the local NUMA
+        // node. If the consuming thread is on a different node, every
+        // subsequent access incurs cross-node latency (~2-3x slower).
+        //
+        // The right fix would be to interleave pages across nodes
+        // (numa_alloc_interleaved), but that requires libnuma. As a
+        // portable approximation, do the memset here (first-touch on
+        // the constructing thread) AND recommend that callers set
+        // OMP_PROC_BIND=close + OMP_PLACES=cores to keep worker threads
+        // on the same NUMA node as the arena constructor.
+        //
+        // We also touch each page explicitly to ensure first-touch
+        // happens on this thread, not whoever happens to write to the
+        // buffer first. memset() typically does this, but being explicit
+        // avoids any compiler smartness that might defer the writes.
         memset(buffer_, 0, maxSize_);
+        // Explicitly touch each 4KB page (size of a virtual memory page
+        // on x86-64) to force first-touch NUMA placement.
+        volatile char touch_sink = 0;
+        for (size_t i = 0; i < maxSize_; i += 4096) {
+            touch_sink = buffer_[i];
+        }
+        (void)touch_sink;
     }
 
     ~ExecutionArena() { free(buffer_); }
