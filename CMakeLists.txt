@@ -54,7 +54,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)  # for tablegen'd files
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
-add_compile_options(-Wall -Wextra -Wno-unused-parameter -fno-exceptions)
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-g -O0 -DJULES_DEBUG)

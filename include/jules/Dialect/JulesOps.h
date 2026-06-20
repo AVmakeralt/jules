@@ -58,6 +58,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 // TableGen'd operation declarations
+#define GET_OP_CLASSES
 #include "jules/Dialect/JulesOps.h.inc"
 
 #endif // JULES_DIALECT_JULESOPS_H

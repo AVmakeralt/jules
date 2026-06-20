@@ -448,7 +448,7 @@ void JITQueue::workerLoop() {
     }
 
     // Check if the job was cancelled while waiting.
-    if (job.cancelled.load()) {
+    if (job.cancelled->load()) {
       continue;
     }
 

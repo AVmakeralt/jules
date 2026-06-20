@@ -29,8 +29,9 @@ using namespace jules;
 // TableGen'd operation implementations
 //===----------------------------------------------------------------------===//
 
+// JulesOps.h (included above) defines GET_OP_CLASSES and includes .h.inc.
+// Now include the .cpp.inc for method definitions.
 #define GET_OP_CLASSES
-#include "jules/Dialect/JulesOps.h.inc"
 #include "jules/Dialect/JulesOps.cpp.inc"
 
 //===----------------------------------------------------------------------===//
@@ -54,8 +55,9 @@ void ConstantOp::build(OpBuilder &builder, OperationState &result,
 
 // Infer result type for matmul.
 LogicalResult MatMulOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes,
+    ::mlir::OpaqueProperties properties,
     RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto lhsType = operands[0].getType().dyn_cast<RankedTensorType>();
@@ -110,51 +112,13 @@ LogicalResult MatMulOp::inferReturnTypes(
 }
 
 //===----------------------------------------------------------------------===//
-// jules.relu
-//===----------------------------------------------------------------------===//
-
-LogicalResult ReluOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes,
-    RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.sigmoid
-//===----------------------------------------------------------------------===//
-
-LogicalResult SigmoidOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes,
-    RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.tanh
-//===----------------------------------------------------------------------===//
-
-LogicalResult TanhOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes,
-    RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // jules.mean
 //===----------------------------------------------------------------------===//
 
 LogicalResult MeanOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes,
+    ::mlir::OpaqueProperties properties,
     RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
@@ -174,8 +138,9 @@ LogicalResult MeanOp::inferReturnTypes(
 //===----------------------------------------------------------------------===//
 
 LogicalResult SumOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes,
+    ::mlir::OpaqueProperties properties,
     RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
@@ -235,8 +200,9 @@ void RandomOp::build(OpBuilder &builder, OperationState &result,
 //===----------------------------------------------------------------------===//
 
 LogicalResult TransposeOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes,
+    ::mlir::OpaqueProperties properties,
     RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   auto inputType = operands[0].getType().dyn_cast<RankedTensorType>();
@@ -271,8 +237,9 @@ void ReshapeOp::build(OpBuilder &builder, OperationState &result,
 //===----------------------------------------------------------------------===//
 
 LogicalResult MulOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
     DictionaryAttr attributes,
+    ::mlir::OpaqueProperties properties,
     RegionRange regions,
     SmallVectorImpl<Type> &inferredReturnTypes) {
   // Element-wise multiply: result type is the broadcast of the two inputs.
@@ -290,19 +257,6 @@ LogicalResult MulOp::inferReturnTypes(
       inferredReturnTypes.push_back(lhsType);
     }
   }
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// jules.sub
-//===----------------------------------------------------------------------===//
-
-LogicalResult SubOp::inferReturnTypes(
-    MLIRContext *context, Optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes,
-    RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
-  inferredReturnTypes.push_back(operands[0].getType());
   return success();
 }
 

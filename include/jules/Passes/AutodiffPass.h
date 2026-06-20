@@ -33,8 +33,8 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/DenseMap.h"
 
-#include <unordered_map>
 #include <vector>
 
 namespace jules {
@@ -59,7 +59,9 @@ private:
                       mlir::OpBuilder &builder);
 
   /// Map from forward Value to its adjoint (gradient) Value.
-  std::unordered_map<mlir::Value, mlir::Value> adjoints_;
+  /// Uses llvm::DenseMap because mlir::Value does not provide a std::hash
+  /// specialization (it is an IntPtr-like wrapper, hashable via DenseMapInfo).
+  llvm::DenseMap<mlir::Value, mlir::Value> adjoints_;
 
   /// The seed adjoint (typically 1.0 for the loss output).
   mlir::Value seed_;

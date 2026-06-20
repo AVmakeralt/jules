@@ -286,13 +286,6 @@ std::unique_ptr<TensorType> Parser::parseTensorType() {
 std::vector<Dimension> Parser::parseDimensions() {
   std::vector<Dimension> dims;
 
-  // Parse first dimension
-  if (check(TokenKind::QuestionMark)) {
-    // Dynamic dimension — we treat '?' as a symbolic dimension
-    // but the TokenKind for '?' doesn't exist; the user can use
-    // a symbolic identifier instead. We handle '?' as a string.
-  }
-
   while (true) {
     if (check(TokenKind::IntLiteral)) {
       // Concrete dimension

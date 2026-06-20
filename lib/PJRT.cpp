@@ -26,6 +26,8 @@
 #include "jules/PJRT.h"
 #include "jules/Diagnostics.h"
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -260,7 +262,7 @@ public:
         break;
       case OpRecord::Log:
         executeUnary(buffers, op,
-                     [](float a) { return a > 0.0f ? std::log(a) : -INFINITY; });
+                     [](float a) { return a > 0.0f ? std::log(a) : -std::numeric_limits<float>::infinity(); });
         break;
       case OpRecord::Constant:
         executeConstant(buffers, op);
@@ -352,7 +354,7 @@ private:
     //   %result = "stablehlo.opname"(%arg1, %arg2, ...) { ... }
     // We capture: result name, op name, operand list
     std::regex opPattern(
-        R"(%(\w+)\s*=\s*"([\w.]+)"\(([^)]*)\))");
+        R"rx(%(\w+)\s*=\s*"([\w.]+)"\(([^)]*)\))rx");
     auto begin = std::sregex_iterator(text.begin(), text.end(), opPattern);
     auto end = std::sregex_iterator();
 
@@ -364,7 +366,7 @@ private:
       // Parse operand names from the operand list.
       // Operands look like: %arg0, %arg1  or  %0  or  %arg0, %arg1, %arg2
       std::vector<std::string> operandNames;
-      std::regex operandPattern(R"(%(\w+))");
+      std::regex operandPattern(R"x(%(\w+))x");
       auto opBegin = std::sregex_iterator(operandsStr.begin(), operandsStr.end(), operandPattern);
       auto opEnd = std::sregex_iterator();
       for (auto oi = opBegin; oi != opEnd; ++oi) {
@@ -460,7 +462,7 @@ private:
         // Try to parse the dense element data from the attribute.
         // Pattern: {value = dense<1.0>} or {value = dense<[1,2,3]>}
         std::regex constPattern(
-            R"(%(\w+)\s*=\s*"stablehlo\.constant"\(\)\s*\{value\s*=\s*dense<([^>]*)>\})");
+            R"x(%(\w+)\s*=\s*"stablehlo\.constant"\(\)\s*\{value\s*=\s*dense<([^>]*)>\})x");
         std::string searchText = text; // search the full text
         auto constBegin = std::sregex_iterator(searchText.begin(), searchText.end(), constPattern);
         auto constEnd = std::sregex_iterator();
@@ -505,7 +507,7 @@ private:
                               std::vector<int64_t> &shape) {
     // Look for: %resultName ... : tensor<DIMxDIMx...xf32>
     std::regex shapePattern(
-        R"(%)" + resultName + R"(\s*=\s*"[^"]*"\([^)]*\)[^{]*:\s*tensor<([^>]+)>)");
+        R"x(%)x" + resultName + R"x(\s*=\s*"[^"]*"\([^)]*\)[^{]*:\s*tensor<([^>]+)>)x");
     auto begin = std::sregex_iterator(text.begin(), text.end(), shapePattern);
     auto end = std::sregex_iterator();
     for (auto it = begin; it != end; ++it) {
@@ -546,7 +548,7 @@ private:
     // Look for permutation = dense<[1, 0]> : tensor<2xi64>
     // This is a best-effort parse; the attribute may appear in various positions.
     std::regex permPattern(
-        R"(%)" + resultName + R"(\s*=\s*"stablehlo\.transpose"\([^)]*\)\s*\{permutation\s*=\s*dense<\[([^\]]*)\]>)");
+        R"x(%)x" + resultName + R"x(\s*=\s*"stablehlo\.transpose"\([^)]*\)\s*\{permutation\s*=\s*dense<\[([^\]]*)\]>)x");
     auto begin = std::sregex_iterator(text.begin(), text.end(), permPattern);
     auto end = std::sregex_iterator();
     for (auto it = begin; it != end; ++it) {
@@ -567,10 +569,10 @@ private:
                                    std::vector<int64_t> &reduceDims) {
     // Look for dimensions = dense<[1]> : tensor<1xi64>
     std::regex dimPattern(
-        R"(dimensions\s*=\s*dense<\[([^\]]*)\]>)");
+        R"x(dimensions\s*=\s*dense<\[([^\]]*)\]>)x");
     // Search in the region near this op definition
     std::regex opPattern(
-        R"(%)" + resultName + R"(\s*=\s*"stablehlo\.reduce"[^}]*\})");
+        R"x(%)x" + resultName + R"x(\s*=\s*"stablehlo\.reduce"[^}]*\})x");
     auto opBegin = std::sregex_iterator(text.begin(), text.end(), opPattern);
     auto opEnd = std::sregex_iterator();
     for (auto oi = opBegin; oi != opEnd; ++oi) {

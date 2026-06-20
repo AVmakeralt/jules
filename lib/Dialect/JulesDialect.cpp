@@ -16,9 +16,8 @@
 
 using namespace mlir;
 
-// Include the full op class declarations (needed for addOperations<> below)
-#define GET_OP_CLASSES
-#include "jules/Dialect/JulesOps.h.inc"
+// JulesOps.h (included above) defines GET_OP_CLASSES and includes JulesOps.h.inc,
+// so the full op class declarations are already visible here.
 
 // Include the definitions for the dialect class (constructor, destructor, etc.)
 #include "jules/Dialect/JulesOpsDialect.cpp.inc"

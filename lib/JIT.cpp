@@ -165,8 +165,11 @@ void JITCompiler::launchPGORecompile(uint64_t traceId, ActiveTrace &trace) {
   auto &execMutex = execMutex_;
   auto &activeCount = activePGORecompiles_;
 
-  pgoThreads_.emplace_back([&diag, &profiler, &config, traceId,
-                             activeCount]() {
+  pgoThreads_.emplace_back([this, traceId]() {
+    auto &diag = diag_;
+    auto &profiler = profiler_;
+    auto &config = config_;
+    auto &activeCount = activePGORecompiles_;
     auto staticShapes = profiler.getStaticShapes(traceId);
     if (staticShapes) {
       if (config.verbose) {
@@ -279,9 +282,9 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
           switch (scalarTy.getScalarKind()) {
           case ScalarType::SK_F32: argType = FloatType::getF32(context.get()); break;
           case ScalarType::SK_F64: argType = FloatType::getF64(context.get()); break;
-          case ScalarType::SK_I32: argType = IntegerType::get(context, 32); break;
-          case ScalarType::SK_I64: argType = IntegerType::get(context, 64); break;
-          case ScalarType::SK_Bool: argType = IntegerType::get(context, 1); break;
+          case ScalarType::SK_I32: argType = IntegerType::get(context.get(), 32); break;
+          case ScalarType::SK_I64: argType = IntegerType::get(context.get(), 64); break;
+          case ScalarType::SK_Bool: argType = IntegerType::get(context.get(), 1); break;
           default: argType = f32Type; break;
           }
         }
@@ -321,7 +324,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
         val = std::get<double>(op.attrs[0].value);
       }
       auto constVal = builder.create<ConstantOp>(
-          loc, builder.getFloatAttr(f32Type, val));
+          loc, builder.getFloatAttr(f32Type, val), f32Type);
       if (!op.outputs.empty() && op.outputs[0] < mlirValues.size()) {
         mlirValues[op.outputs[0]] = constVal.getResult();
       }
@@ -384,7 +387,8 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       if (op.inputs.size() >= 2 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]]) {
         auto result = builder.create<MatMulOp>(
-            loc, mlirValues[op.inputs[0]], mlirValues[op.inputs[1]]);
+            loc, mlirValues[op.inputs[0]], mlirValues[op.inputs[1]],
+            ::mlir::StringAttr(), ::mlir::StringAttr());
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
@@ -466,7 +470,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
         auto result = builder.create<CastOp>(
-            loc, mlirValues[op.inputs[0]], TypeAttr::get(f32Type));
+            loc, f32Type, mlirValues[op.inputs[0]], TypeAttr::get(f32Type));
         mlirValues[op.outputs[0]] = result.getResult();
       }
       break;
@@ -476,7 +480,8 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
           mlirValues[op.inputs[0]] && mlirValues[op.inputs[1]] &&
           mlirValues[op.inputs[2]]) {
         auto result = builder.create<SelectOp>(
-            loc, mlirValues[op.inputs[0]],
+            loc, mlirValues[op.inputs[1]].getType(),
+            mlirValues[op.inputs[0]],
             mlirValues[op.inputs[1]], mlirValues[op.inputs[2]]);
         mlirValues[op.outputs[0]] = result.getResult();
       }
@@ -485,13 +490,14 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
     case TraceOpKind::Grad: {
       if (op.inputs.size() >= 1 && op.outputs.size() >= 1 &&
           mlirValues[op.inputs[0]]) {
-        auto diffVar = "x";
+        std::string diffVar = "x";
         if (!op.attrs.empty() &&
             op.attrs[0].kind == TraceOp::Attr::Kind::String) {
           diffVar = std::get<std::string>(op.attrs[0].value);
         }
         auto result = builder.create<GradOp>(
-            loc, mlirValues[op.inputs[0]],
+            loc, mlirValues[op.inputs[0]].getType(),
+            mlirValues[op.inputs[0]],
             builder.getStringAttr(diffVar));
         mlirValues[op.outputs[0]] = result.getResult();
       }
@@ -503,7 +509,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
         builder.create<func::ReturnOp>(loc, mlirValues[op.inputs[0]]);
       } else {
         auto zero = builder.create<ConstantOp>(
-            loc, builder.getFloatAttr(f32Type, 0.0));
+            loc, builder.getFloatAttr(f32Type, 0.0), f32Type);
         builder.create<func::ReturnOp>(loc, zero.getResult());
       }
       break;
@@ -517,7 +523,7 @@ std::shared_ptr<Executable> JITCompiler::compileThroughMLIR(
 
   if (entryBlock->empty() || !entryBlock->mightHaveTerminator()) {
     auto zero = builder.create<ConstantOp>(
-        builder.getUnknownLoc(), builder.getFloatAttr(f32Type, 0.0));
+        builder.getUnknownLoc(), builder.getFloatAttr(f32Type, 0.0), f32Type);
     builder.create<func::ReturnOp>(builder.getUnknownLoc(), zero.getResult());
   }
 

@@ -37,8 +37,8 @@ def Jules_Dialect : Dialect {
   let hasConstantMaterializer = 1;
   let useDefaultTypePrinterParser = 0;
   let extraClassDeclaration = [{
-    Type parseType(DialectAsmParser &parser) const override;
-    void printType(Type type, DialectAsmPrinter &os) const override;
+    ::mlir::Type parseType(::mlir::DialectAsmParser &parser) const override;
+    void printType(::mlir::Type type, ::mlir::DialectAsmPrinter &os) const override;
   }];
 }
 
@@ -54,7 +54,7 @@ class JulesOp<string mnemonic, list<Trait> traits = []> :
 // Constant
 //===----------------------------------------------------------------------===//
 
-def ConstantOp : JulesOp<"constant", [NoSideEffect, ConstantLike]> {
+def ConstantOp : JulesOp<"constant", [Pure, ConstantLike]> {
   let summary = "Create a constant value";
   let description = [{
     Creates a constant scalar or tensor value. The value is specified as a
@@ -65,7 +65,8 @@ def ConstantOp : JulesOp<"constant", [NoSideEffect, ConstantLike]> {
   let hasCustomAssemblyFormat = 1;
   let hasFolder = 1;
   let builders = [
-    OpBuilder<(ins "double":$value, "Type":$type)>
+    OpBuilder<(ins "double":$value, "::mlir::Type":$type)>,
+    OpBuilder<(ins "::mlir::Attribute":$value, "::mlir::Type":$type)>
   ];
 }
 
@@ -73,7 +74,7 @@ def ConstantOp : JulesOp<"constant", [NoSideEffect, ConstantLike]> {
 // Element-wise binary operations
 //===----------------------------------------------------------------------===//
 
-def AddOp : JulesOp<"add", [NoSideEffect, Commutative, SameOperandsAndResultType]> {
+def AddOp : JulesOp<"add", [Pure, Commutative, SameOperandsAndResultType]> {
   let summary = "Element-wise addition";
   let description = [{
     Computes element-wise addition of two tensors or scalars.
@@ -85,7 +86,7 @@ def AddOp : JulesOp<"add", [NoSideEffect, Commutative, SameOperandsAndResultType
   let hasFolder = 1;
 }
 
-def SubOp : JulesOp<"sub", [NoSideEffect, SameOperandsAndResultType, InferTypeOpInterface]> {
+def SubOp : JulesOp<"sub", [Pure, SameOperandsAndResultType, InferTypeOpInterface]> {
   let summary = "Element-wise subtraction";
   let description = [{
     Computes element-wise subtraction of two tensors or scalars.
@@ -96,7 +97,7 @@ def SubOp : JulesOp<"sub", [NoSideEffect, SameOperandsAndResultType, InferTypeOp
   let hasFolder = 1;
 }
 
-def MulOp : JulesOp<"mul", [NoSideEffect, Commutative, InferTypeOpInterface]> {
+def MulOp : JulesOp<"mul", [Pure, Commutative, InferTypeOpInterface]> {
   let summary = "Element-wise multiplication";
   let description = [{
     Computes element-wise multiplication of two tensors or scalars.
@@ -109,15 +110,16 @@ def MulOp : JulesOp<"mul", [NoSideEffect, Commutative, InferTypeOpInterface]> {
   let extraClassDeclaration = [{
     static ::mlir::LogicalResult inferReturnTypes(
         ::mlir::MLIRContext *context,
-        ::llvm::Optional<::mlir::Location> location,
+        ::std::optional<::mlir::Location> location,
         ::mlir::ValueRange operands,
         ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
         ::mlir::RegionRange regions,
         ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
   }];
 }
 
-def DivOp : JulesOp<"div", [NoSideEffect]> {
+def DivOp : JulesOp<"div", [Pure, SameOperandsAndResultType]> {
   let summary = "Element-wise division";
   let description = [{
     Computes element-wise division of two tensors or scalars.
@@ -127,7 +129,7 @@ def DivOp : JulesOp<"div", [NoSideEffect]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
-def PowOp : JulesOp<"pow", [NoSideEffect]> {
+def PowOp : JulesOp<"pow", [Pure, SameOperandsAndResultType]> {
   let summary = "Element-wise power";
   let description = [{
     Computes element-wise power operation: lhs ^ rhs.
@@ -137,7 +139,47 @@ def PowOp : JulesOp<"pow", [NoSideEffect]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
-def NegOp : JulesOp<"neg", [NoSideEffect, SameOperandsAndResultType]> {
+def ModOp : JulesOp<"mod", [Pure, SameOperandsAndResultType]> {
+  let summary = "Element-wise modulo";
+  let description = [{
+    Computes element-wise modulo operation: lhs % rhs.
+  }];
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def SqrtOp : JulesOp<"sqrt", [Pure, SameOperandsAndResultType]> {
+  let summary = "Element-wise square root";
+  let description = [{
+    Computes the element-wise square root of the input.
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input attr-dict `:` type($result)";
+}
+
+def AbsOp : JulesOp<"abs", [Pure, SameOperandsAndResultType]> {
+  let summary = "Element-wise absolute value";
+  let description = [{
+    Computes the element-wise absolute value of the input.
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$input attr-dict `:` type($result)";
+}
+
+def CrossEntropyOp : JulesOp<"cross_entropy", [Pure]> {
+  let summary = "Cross-entropy loss";
+  let description = [{
+    Computes cross-entropy loss between predicted logits and target labels.
+  }];
+  let arguments = (ins AnyType:$logits, AnyType:$labels);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$logits `,` $labels attr-dict `:` type($logits) `,` type($labels) `->` type($result)";
+}
+
+def NegOp : JulesOp<"neg", [Pure, SameOperandsAndResultType]> {
   let summary = "Negation";
   let description = [{
     Computes the negation of a tensor or scalar.
@@ -152,7 +194,7 @@ def NegOp : JulesOp<"neg", [NoSideEffect, SameOperandsAndResultType]> {
 // Matrix operations
 //===----------------------------------------------------------------------===//
 
-def MatMulOp : JulesOp<"matmul", [NoSideEffect, InferTypeOpInterface]> {
+def MatMulOp : JulesOp<"matmul", [Pure, InferTypeOpInterface]> {
   let summary = "Matrix multiplication";
   let description = [{
     Computes matrix multiplication. Supports 2D and batched variants:
@@ -168,9 +210,10 @@ def MatMulOp : JulesOp<"matmul", [NoSideEffect, InferTypeOpInterface]> {
   let extraClassDeclaration = [{
     static ::mlir::LogicalResult inferReturnTypes(
         ::mlir::MLIRContext *context,
-        ::llvm::Optional<::mlir::Location> location,
+        ::std::optional<::mlir::Location> location,
         ::mlir::ValueRange operands,
         ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
         ::mlir::RegionRange regions,
         ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
   }];
@@ -180,7 +223,7 @@ def MatMulOp : JulesOp<"matmul", [NoSideEffect, InferTypeOpInterface]> {
 // Activation functions
 //===----------------------------------------------------------------------===//
 
-def ReluOp : JulesOp<"relu", [NoSideEffect, SameOperandsAndResultType, InferTypeOpInterface]> {
+def ReluOp : JulesOp<"relu", [Pure, SameOperandsAndResultType, InferTypeOpInterface]> {
   let summary = "ReLU activation";
   let description = [{
     Computes the Rectified Linear Unit activation: max(0, x).
@@ -190,7 +233,7 @@ def ReluOp : JulesOp<"relu", [NoSideEffect, SameOperandsAndResultType, InferType
   let assemblyFormat = "$input attr-dict `:` type($result)";
 }
 
-def SigmoidOp : JulesOp<"sigmoid", [NoSideEffect, SameOperandsAndResultType, InferTypeOpInterface]> {
+def SigmoidOp : JulesOp<"sigmoid", [Pure, SameOperandsAndResultType, InferTypeOpInterface]> {
   let summary = "Sigmoid activation";
   let description = [{
     Computes the sigmoid activation: 1 / (1 + exp(-x)).
@@ -200,7 +243,7 @@ def SigmoidOp : JulesOp<"sigmoid", [NoSideEffect, SameOperandsAndResultType, Inf
   let assemblyFormat = "$input attr-dict `:` type($result)";
 }
 
-def TanhOp : JulesOp<"tanh", [NoSideEffect, SameOperandsAndResultType, InferTypeOpInterface]> {
+def TanhOp : JulesOp<"tanh", [Pure, SameOperandsAndResultType, InferTypeOpInterface]> {
   let summary = "Tanh activation";
   let description = [{
     Computes the hyperbolic tangent activation.
@@ -210,7 +253,7 @@ def TanhOp : JulesOp<"tanh", [NoSideEffect, SameOperandsAndResultType, InferType
   let assemblyFormat = "$input attr-dict `:` type($result)";
 }
 
-def GeluOp : JulesOp<"gelu", [NoSideEffect, SameOperandsAndResultType]> {
+def GeluOp : JulesOp<"gelu", [Pure, SameOperandsAndResultType]> {
   let summary = "GELU activation";
   let description = [{
     Computes the Gaussian Error Linear Unit activation:
@@ -221,7 +264,7 @@ def GeluOp : JulesOp<"gelu", [NoSideEffect, SameOperandsAndResultType]> {
   let assemblyFormat = "$input attr-dict `:` type($result)";
 }
 
-def ExpOp : JulesOp<"exp", [NoSideEffect, SameOperandsAndResultType]> {
+def ExpOp : JulesOp<"exp", [Pure, SameOperandsAndResultType]> {
   let summary = "Element-wise exponential";
   let description = [{
     Computes the element-wise exponential function: exp(x).
@@ -235,7 +278,7 @@ def ExpOp : JulesOp<"exp", [NoSideEffect, SameOperandsAndResultType]> {
 // Reduction operations
 //===----------------------------------------------------------------------===//
 
-def MeanOp : JulesOp<"mean", [NoSideEffect, InferTypeOpInterface]> {
+def MeanOp : JulesOp<"mean", [Pure, InferTypeOpInterface]> {
   let summary = "Mean reduction";
   let description = [{
     Computes the mean of all elements in a tensor, producing a scalar tensor.
@@ -246,15 +289,16 @@ def MeanOp : JulesOp<"mean", [NoSideEffect, InferTypeOpInterface]> {
   let extraClassDeclaration = [{
     static ::mlir::LogicalResult inferReturnTypes(
         ::mlir::MLIRContext *context,
-        ::llvm::Optional<::mlir::Location> location,
+        ::std::optional<::mlir::Location> location,
         ::mlir::ValueRange operands,
         ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
         ::mlir::RegionRange regions,
         ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
   }];
 }
 
-def SumOp : JulesOp<"sum", [NoSideEffect, InferTypeOpInterface]> {
+def SumOp : JulesOp<"sum", [Pure, InferTypeOpInterface]> {
   let summary = "Sum reduction";
   let description = [{
     Computes the sum of all elements in a tensor, producing a scalar tensor.
@@ -265,9 +309,10 @@ def SumOp : JulesOp<"sum", [NoSideEffect, InferTypeOpInterface]> {
   let extraClassDeclaration = [{
     static ::mlir::LogicalResult inferReturnTypes(
         ::mlir::MLIRContext *context,
-        ::llvm::Optional<::mlir::Location> location,
+        ::std::optional<::mlir::Location> location,
         ::mlir::ValueRange operands,
         ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
         ::mlir::RegionRange regions,
         ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
   }];
@@ -277,7 +322,7 @@ def SumOp : JulesOp<"sum", [NoSideEffect, InferTypeOpInterface]> {
 // Tensor creation
 //===----------------------------------------------------------------------===//
 
-def ZerosOp : JulesOp<"zeros", [NoSideEffect]> {
+def ZerosOp : JulesOp<"zeros", [Pure]> {
   let summary = "Zero-filled tensor";
   let description = [{
     Creates a tensor filled with zeros of the specified shape and element type.
@@ -286,11 +331,11 @@ def ZerosOp : JulesOp<"zeros", [NoSideEffect]> {
   let results = (outs AnyType:$result);
   let assemblyFormat = "$shape attr-dict `:` type($result)";
   let builders = [
-    OpBuilder<(ins "RankedTensorType":$resultType)>
+    OpBuilder<(ins "::mlir::RankedTensorType":$resultType)>
   ];
 }
 
-def OnesOp : JulesOp<"ones", [NoSideEffect]> {
+def OnesOp : JulesOp<"ones", [Pure]> {
   let summary = "One-filled tensor";
   let description = [{
     Creates a tensor filled with ones of the specified shape and element type.
@@ -299,7 +344,7 @@ def OnesOp : JulesOp<"ones", [NoSideEffect]> {
   let results = (outs AnyType:$result);
   let assemblyFormat = "$shape attr-dict `:` type($result)";
   let builders = [
-    OpBuilder<(ins "RankedTensorType":$resultType)>
+    OpBuilder<(ins "::mlir::RankedTensorType":$resultType)>
   ];
 }
 
@@ -313,7 +358,7 @@ def RandomOp : JulesOp<"random"> {
   let results = (outs AnyType:$result);
   let assemblyFormat = "$shape attr-dict `:` type($result)";
   let builders = [
-    OpBuilder<(ins "RankedTensorType":$resultType)>
+    OpBuilder<(ins "::mlir::RankedTensorType":$resultType)>
   ];
 }
 
@@ -321,7 +366,7 @@ def RandomOp : JulesOp<"random"> {
 // Type conversion
 //===----------------------------------------------------------------------===//
 
-def CastOp : JulesOp<"cast", [NoSideEffect]> {
+def CastOp : JulesOp<"cast", [Pure]> {
   let summary = "Type cast";
   let description = [{
     Casts a tensor or scalar from one type to another.
@@ -351,7 +396,7 @@ def GradOp : JulesOp<"grad"> {
 // Tensor manipulation
 //===----------------------------------------------------------------------===//
 
-def TransposeOp : JulesOp<"transpose", [NoSideEffect, InferTypeOpInterface]> {
+def TransposeOp : JulesOp<"transpose", [Pure, InferTypeOpInterface]> {
   let summary = "Tensor transpose";
   let description = [{
     Transposes a 2D tensor by swapping its dimensions.
@@ -362,15 +407,16 @@ def TransposeOp : JulesOp<"transpose", [NoSideEffect, InferTypeOpInterface]> {
   let extraClassDeclaration = [{
     static ::mlir::LogicalResult inferReturnTypes(
         ::mlir::MLIRContext *context,
-        ::llvm::Optional<::mlir::Location> location,
+        ::std::optional<::mlir::Location> location,
         ::mlir::ValueRange operands,
         ::mlir::DictionaryAttr attributes,
+        ::mlir::OpaqueProperties properties,
         ::mlir::RegionRange regions,
         ::llvm::SmallVectorImpl<::mlir::Type>& inferredReturnTypes);
   }];
 }
 
-def ReshapeOp : JulesOp<"reshape", [NoSideEffect]> {
+def ReshapeOp : JulesOp<"reshape", [Pure]> {
   let summary = "Tensor reshape";
   let description = [{
     Reshapes a tensor to a new shape with the same total number of elements.
@@ -379,11 +425,11 @@ def ReshapeOp : JulesOp<"reshape", [NoSideEffect]> {
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input `to` $shape attr-dict `:` type($input) `->` type($result)";
   let builders = [
-    OpBuilder<(ins "Value":$input, "RankedTensorType":$resultType)>
+    OpBuilder<(ins "::mlir::Value":$input, "::mlir::RankedTensorType":$resultType)>
   ];
 }
 
-def ConcatOp : JulesOp<"concat", [NoSideEffect]> {
+def ConcatOp : JulesOp<"concat", [Pure]> {
   let summary = "Tensor concatenation";
   let description = [{
     Concatenates tensors along a specified axis.
@@ -393,7 +439,7 @@ def ConcatOp : JulesOp<"concat", [NoSideEffect]> {
   let assemblyFormat = "$inputs `,` $axis attr-dict `:` type($inputs) `->` type($result)";
 }
 
-def SliceOp : JulesOp<"slice", [NoSideEffect]> {
+def SliceOp : JulesOp<"slice", [Pure]> {
   let summary = "Tensor slice";
   let description = [{
     Extracts a slice from a tensor along each dimension.
@@ -410,7 +456,7 @@ def SliceOp : JulesOp<"slice", [NoSideEffect]> {
 // Conditional
 //===----------------------------------------------------------------------===//
 
-def SelectOp : JulesOp<"select", [NoSideEffect]> {
+def SelectOp : JulesOp<"select", [Pure]> {
   let summary = "Conditional select";
   let description = [{
     Selects between two values based on a condition (element-wise ternary).
@@ -424,7 +470,7 @@ def SelectOp : JulesOp<"select", [NoSideEffect]> {
 // Comparison
 //===----------------------------------------------------------------------===//
 
-def CmpOp : JulesOp<"cmp", [NoSideEffect]> {
+def CmpOp : JulesOp<"cmp", [Pure]> {
   let summary = "Comparison operation";
   let description = [{
     Compares two tensors or scalars element-wise.
@@ -438,7 +484,7 @@ def CmpOp : JulesOp<"cmp", [NoSideEffect]> {
 // Element-wise unary math
 //===----------------------------------------------------------------------===//
 
-def LogOp : JulesOp<"log", [NoSideEffect, SameOperandsAndResultType]> {
+def LogOp : JulesOp<"log", [Pure, SameOperandsAndResultType]> {
   let summary = "Element-wise natural logarithm";
   let description = [{
     Computes the element-wise natural logarithm of a tensor or scalar.
@@ -452,7 +498,7 @@ def LogOp : JulesOp<"log", [NoSideEffect, SameOperandsAndResultType]> {
 // Tensor padding
 //===----------------------------------------------------------------------===//
 
-def PadOp : JulesOp<"pad", [NoSideEffect]> {
+def PadOp : JulesOp<"pad", [Pure]> {
   let summary = "Tensor padding";
   let description = [{
     Pads a tensor with edge values or a constant along each dimension.
@@ -473,7 +519,7 @@ def PadOp : JulesOp<"pad", [NoSideEffect]> {
 // Broadcasting
 //===----------------------------------------------------------------------===//
 
-def BroadcastInDimOp : JulesOp<"broadcast_in_dim", [NoSideEffect]> {
+def BroadcastInDimOp : JulesOp<"broadcast_in_dim", [Pure]> {
   let summary = "Broadcast tensor with explicit dimension mapping";
   let description = [{
     Broadcasts a tensor to a target shape using the given broadcast_dimensions.
@@ -490,7 +536,7 @@ def BroadcastInDimOp : JulesOp<"broadcast_in_dim", [NoSideEffect]> {
 // Reduction with body
 //===----------------------------------------------------------------------===//
 
-def ReduceOp : JulesOp<"reduce", [NoSideEffect]> {
+def ReduceOp : JulesOp<"reduce", [Pure]> {
   let summary = "Reduction with a body region";
   let description = [{
     Reduces a tensor along the given dimensions using a reduction body region.
@@ -546,7 +592,7 @@ def ParallelOp : JulesOp<"parallel"> {
 // Fake quantization (quantization-aware training)
 //===----------------------------------------------------------------------===//
 
-def FakeQuantOp : JulesOp<"fake_quant", [NoSideEffect]> {
+def FakeQuantOp : JulesOp<"fake_quant", [Pure]> {
   let summary = "Fake quantization for quantization-aware training";
   let description = [{
     Simulates the effect of quantization by quantizing to a lower-precision
@@ -569,7 +615,7 @@ def FakeQuantOp : JulesOp<"fake_quant", [NoSideEffect]> {
 // Custom kernel injection
 //===----------------------------------------------------------------------===//
 
-def ExternKernelOp : JulesOp<"extern_kernel", [NoSideEffect]> {
+def ExternKernelOp : JulesOp<"extern_kernel", [Pure]> {
   let summary = "External kernel call";
   let description = [{
     Calls an external kernel function by name, bypassing the StableHLO path.
@@ -587,7 +633,7 @@ def ExternKernelOp : JulesOp<"extern_kernel", [NoSideEffect]> {
 // Convolution
 //===----------------------------------------------------------------------===//
 
-def Conv2DOp : JulesOp<"conv2d", [NoSideEffect]> {
+def Conv2DOp : JulesOp<"conv2d", [Pure]> {
   let summary = "2D convolution";
   let description = [{
     Computes a 2D convolution over an input tensor with a kernel tensor.
@@ -611,7 +657,7 @@ def Conv2DOp : JulesOp<"conv2d", [NoSideEffect]> {
 // Distributed collective operations
 //===----------------------------------------------------------------------===//
 
-def AllReduceOp : JulesOp<"all_reduce", [NoSideEffect]> {
+def AllReduceOp : JulesOp<"all_reduce", [Pure]> {
   let summary = "All-reduce collective operation";
   let description = [{
     Performs an all-reduce operation across all devices in a device group.
@@ -625,7 +671,7 @@ def AllReduceOp : JulesOp<"all_reduce", [NoSideEffect]> {
   let assemblyFormat = "$input `,` $reduction attr-dict `:` type($input) `->` type($result)";
 }
 
-def AllGatherOp : JulesOp<"all_gather", [NoSideEffect]> {
+def AllGatherOp : JulesOp<"all_gather", [Pure]> {
   let summary = "All-gather collective operation";
   let description = [{
     Gathers values from all devices along a specified dimension and

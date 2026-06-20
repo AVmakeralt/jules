@@ -213,7 +213,7 @@ bool AOTCompiler::injectTelemetry(ModuleOp module) {
   module.walk([&](func::FuncOp funcOp) {
     // Don't instrument internal/__jules functions.
     auto name = funcOp.getName();
-    if (name.startswith("__jules_")) return;
+    if (name.starts_with("__jules_")) return;
 
     // Add telemetry enabled attribute to the function.
     funcOp->setAttr("jules.telemetry.enabled",

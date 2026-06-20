@@ -562,8 +562,7 @@ private:
             lexer_.lex();
             record.constData.push_back(static_cast<float>(valTok.intValue));
           } else if (valTok.kind == MLIRTokenKind::RBracket ||
-                     valTok.kind == MLIRTokenKind::RBrace ||
-                     valTok.kind == MLIRTokenKind::Greater) {
+                     valTok.kind == MLIRTokenKind::RBrace) {
             // '>' is consumed as unknown, but we check text
             break;
           } else {
@@ -647,25 +646,25 @@ public:
                      const std::string &entryName,
                      size_t numInputs) {
     // Create the function type: void(int32_t, TensorDescriptor**)
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
-    auto *voidTy = Type::getVoidTy(ctx_);
-    auto *ptrTy = PointerType::get(ctx_, 0);
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
+    auto *voidTy = llvm::Type::getVoidTy(ctx_);
+    auto *ptrTy = llvm::PointerType::get(ctx_, 0);
 
     // TensorDescriptor struct type:
     //   { float*, i64, [6 x i64], [6 x i64], i32 }
     auto *sizesArrayTy = ArrayType::get(int64Ty, 6);
     auto *stridesArrayTy = ArrayType::get(int64Ty, 6);
-    descriptorTy_ = StructType::create(
+    descriptorTy_ = llvm::StructType::create(
         ctx_,
         {ptrTy, int64Ty, sizesArrayTy, stridesArrayTy, int32Ty},
         "TensorDescriptor");
 
-    auto *descriptorPtrTy = PointerType::get(descriptorTy_, 0);
-    auto *descriptorPtrPtrTy = PointerType::get(descriptorPtrTy, 0);
+    auto *descriptorPtrTy = llvm::PointerType::get(descriptorTy_, 0);
+    auto *descriptorPtrPtrTy = llvm::PointerType::get(descriptorPtrTy, 0);
 
-    auto *fnType = FunctionType::get(voidTy, {int32Ty, descriptorPtrPtrTy}, false);
+    auto *fnType = llvm::FunctionType::get(voidTy, {int32Ty, descriptorPtrPtrTy}, false);
     auto *fn = Function::Create(fnType, Function::ExternalLinkage, entryName, mod_);
 
     // Create entry block
@@ -689,7 +688,7 @@ public:
       bufferDescPtrs[i] = builder_.CreateAlloca(descriptorPtrTy);
       if (i < numInputs) {
         // Load the descriptor from the args array
-        auto *idx = ConstantInt::get(int32Ty, i);
+        auto *idx = llvm::ConstantInt::get(int32Ty, i);
         auto *gep = builder_.CreateGEP(descriptorPtrPtrTy, argsPtr, idx);
         auto *desc = builder_.CreateLoad(descriptorPtrTy, gep);
         builder_.CreateStore(desc, bufferDescPtrs[i]);
@@ -720,86 +719,86 @@ public:
 private:
   LLVMContext &ctx_;
   Module &mod_;
-  IRBuilder<> builder_;
+  llvm::IRBuilder<> builder_;
   StructType *descriptorTy_ = nullptr;
 
   // ── Descriptor Access Helpers ──────────────────────────────────────────────
 
   /// Get a pointer to the data field of a TensorDescriptor.
-  Value *getDataPtr(Value *descPtr) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
+  llvm::Value *getDataPtr(llvm::Value *descPtr) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
     auto *dataGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, zero});
-    auto *dataPtrPtr = builder_.CreateLoad(PointerType::get(ctx_, 0), dataGep);
+    auto *dataPtrPtr = builder_.CreateLoad(llvm::PointerType::get(ctx_, 0), dataGep);
     return dataPtrPtr;
   }
 
   /// Get the size of dimension d from a TensorDescriptor.
-  Value *getSize(Value *descPtr, unsigned d) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
-    auto *dIdx = ConstantInt::get(int32Ty, d);
-    auto *sizesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, ConstantInt::get(int32Ty, 2), dIdx});
-    return builder_.CreateLoad(Type::getInt64Ty(ctx_), sizesGep);
+  llvm::Value *getSize(llvm::Value *descPtr, unsigned d) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
+    auto *dIdx = llvm::ConstantInt::get(int32Ty, d);
+    auto *sizesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, llvm::ConstantInt::get(int32Ty, 2), dIdx});
+    return builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), sizesGep);
   }
 
   /// Get the rank from a TensorDescriptor.
-  Value *getRank(Value *descPtr) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
-    auto *rankGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, ConstantInt::get(int32Ty, 4)});
+  llvm::Value *getRank(llvm::Value *descPtr) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
+    auto *rankGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, llvm::ConstantInt::get(int32Ty, 4)});
     return builder_.CreateLoad(int32Ty, rankGep);
   }
 
   /// Compute total number of elements from sizes.
-  Value *computeNumElements(Value *descPtr) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *total = ConstantInt::get(int64Ty, 1);
+  llvm::Value *computeNumElements(llvm::Value *descPtr) {
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *total = llvm::ConstantInt::get(int64Ty, 1);
     auto *rank = getRank(descPtr);
 
     // Loop over dimensions 0..5, multiply if dim < rank
     for (unsigned d = 0; d < 6; ++d) {
       auto *dimSize = getSize(descPtr, d);
-      auto *dimIdx = ConstantInt::get(int32Ty, d);
+      auto *dimIdx = llvm::ConstantInt::get(int32Ty, d);
       auto *inRange = builder_.CreateICmpSLT(dimIdx, rank);
-      auto *sel = builder_.CreateSelect(inRange, dimSize, ConstantInt::get(int64Ty, 1));
+      auto *sel = builder_.CreateSelect(inRange, dimSize, llvm::ConstantInt::get(int64Ty, 1));
       total = builder_.CreateMul(total, sel);
     }
     return total;
   }
 
   /// Store the data pointer to a descriptor.
-  void setDataPtr(Value *descPtr, Value *dataPtr) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
+  void setDataPtr(llvm::Value *descPtr, llvm::Value *dataPtr) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
     auto *dataGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, zero});
     builder_.CreateStore(dataPtr, dataGep);
   }
 
   /// Set the size of dimension d in a TensorDescriptor.
-  void setSize(Value *descPtr, unsigned d, Value *size) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
-    auto *dIdx = ConstantInt::get(int32Ty, d);
-    auto *sizesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, ConstantInt::get(int32Ty, 2), dIdx});
+  void setSize(llvm::Value *descPtr, unsigned d, llvm::Value *size) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
+    auto *dIdx = llvm::ConstantInt::get(int32Ty, d);
+    auto *sizesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, llvm::ConstantInt::get(int32Ty, 2), dIdx});
     builder_.CreateStore(size, sizesGep);
   }
 
   /// Set the stride of dimension d in a TensorDescriptor.
-  void setStride(Value *descPtr, unsigned d, Value *stride) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
-    auto *dIdx = ConstantInt::get(int32Ty, d);
-    auto *stridesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, ConstantInt::get(int32Ty, 3), dIdx});
+  void setStride(llvm::Value *descPtr, unsigned d, llvm::Value *stride) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
+    auto *dIdx = llvm::ConstantInt::get(int32Ty, d);
+    auto *stridesGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, llvm::ConstantInt::get(int32Ty, 3), dIdx});
     builder_.CreateStore(stride, stridesGep);
   }
 
   /// Set the rank in a TensorDescriptor.
-  void setRank(Value *descPtr, Value *rank) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *zero = ConstantInt::get(int32Ty, 0);
-    auto *rankGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, ConstantInt::get(int32Ty, 4)});
+  void setRank(llvm::Value *descPtr, llvm::Value *rank) {
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *zero = llvm::ConstantInt::get(int32Ty, 0);
+    auto *rankGep = builder_.CreateGEP(descriptorTy_, descPtr, {zero, llvm::ConstantInt::get(int32Ty, 4)});
     builder_.CreateStore(rank, rankGep);
   }
 
@@ -808,9 +807,9 @@ private:
   /// Allocate an output buffer descriptor and data array.
   void allocateOutputBuffer(const LLVMOpsRecord &op,
                             std::vector<AllocaInst*> &bufferDescPtrs) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
 
     int outIdx = op.output;
     auto *descAlloca = builder_.CreateAlloca(descriptorTy_);
@@ -819,22 +818,22 @@ private:
     auto *descPtr = descAlloca;
 
     // Determine output shape and number of elements
-    Value *numElements = ConstantInt::get(int64Ty, 1);
+    llvm::Value *numElements = llvm::ConstantInt::get(int64Ty, 1);
     int rank = 0;
 
     if (op.kind == LLVMOpsRecord::Constant && !op.outputShape.empty()) {
       rank = static_cast<int>(op.outputShape.size());
       for (int d = 0; d < rank; ++d) {
-        setSize(descPtr, d, ConstantInt::get(int64Ty, op.outputShape[d]));
+        setSize(descPtr, d, llvm::ConstantInt::get(int64Ty, op.outputShape[d]));
         numElements = builder_.CreateMul(numElements,
-                                          ConstantInt::get(int64Ty, op.outputShape[d]));
+                                          llvm::ConstantInt::get(int64Ty, op.outputShape[d]));
       }
     } else if (op.kind == LLVMOpsRecord::MatMul) {
       // Output shape: [M, N]
       auto *lhsDescPtr = builder_.CreateLoad(
-          PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+          llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
       auto *rhsDescPtr = builder_.CreateLoad(
-          PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
+          llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
       auto *M = getSize(lhsDescPtr, 0);
       auto *K = getSize(lhsDescPtr, 1);
       auto *N = getSize(rhsDescPtr, 1);
@@ -842,33 +841,33 @@ private:
       setSize(descPtr, 0, M);
       setSize(descPtr, 1, N);
       setStride(descPtr, 0, N);
-      setStride(descPtr, 1, ConstantInt::get(int64Ty, 1));
-      setRank(descPtr, ConstantInt::get(int32Ty, 2));
+      setStride(descPtr, 1, llvm::ConstantInt::get(int64Ty, 1));
+      setRank(descPtr, llvm::ConstantInt::get(int32Ty, 2));
 
       numElements = builder_.CreateMul(M, N);
       auto *dataArr = builder_.CreateAlloca(floatTy, numElements);
       setDataPtr(descPtr, dataArr);
       // Zero-initialize
-      emitMemset(dataArr, ConstantInt::get(int32Ty, 0), numElements);
+      emitMemset(dataArr, llvm::ConstantInt::get(int32Ty, 0), numElements);
       return;
     } else if (op.input1 >= 0 && static_cast<size_t>(op.input1) < bufferDescPtrs.size()) {
       // Inherit shape from input
       auto *inDescPtr = builder_.CreateLoad(
-          PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+          llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
       auto *inRank = getRank(inDescPtr);
       setRank(descPtr, inRank);
 
       for (unsigned d = 0; d < 6; ++d) {
         auto *dimSize = getSize(inDescPtr, d);
-        auto *dIdx = ConstantInt::get(int32Ty, d);
+        auto *dIdx = llvm::ConstantInt::get(int32Ty, d);
         auto *inRange = builder_.CreateICmpSLT(dIdx, inRank);
-        auto *sel = builder_.CreateSelect(inRange, dimSize, ConstantInt::get(int64Ty, 1));
+        auto *sel = builder_.CreateSelect(inRange, dimSize, llvm::ConstantInt::get(int64Ty, 1));
         setSize(descPtr, d, sel);
         numElements = builder_.CreateMul(numElements, sel);
       }
     } else {
-      numElements = ConstantInt::get(int64Ty, 1);
-      setRank(descPtr, ConstantInt::get(int32Ty, 0));
+      numElements = llvm::ConstantInt::get(int64Ty, 1);
+      setRank(descPtr, llvm::ConstantInt::get(int32Ty, 0));
     }
 
     // Allocate the data array
@@ -877,16 +876,16 @@ private:
   }
 
   /// Emit a simple memset-like pattern for zero-initialization.
-  void emitMemset(Value *ptr, Value *val, Value *count) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+  void emitMemset(llvm::Value *ptr, llvm::Value *val, llvm::Value *count) {
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
 
     auto *fn = builder_.GetInsertBlock()->getParent();
     auto *loopBB = BasicBlock::Create(ctx_, "memset.loop", fn);
     auto *endBB = BasicBlock::Create(ctx_, "memset.end", fn);
 
-    auto *zero = ConstantInt::get(int64Ty, 0);
-    auto *one = ConstantInt::get(int64Ty, 1);
+    auto *zero = llvm::ConstantInt::get(int64Ty, 0);
+    auto *one = llvm::ConstantInt::get(int64Ty, 1);
 
     builder_.CreateBr(loopBB);
 
@@ -914,60 +913,60 @@ private:
     switch (op.kind) {
     case LLVMOpsRecord::Add:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateFAdd(a, b_val);
                        });
       break;
     case LLVMOpsRecord::Sub:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateFSub(a, b_val);
                        });
       break;
     case LLVMOpsRecord::Mul:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateFMul(a, b_val);
                        });
       break;
     case LLVMOpsRecord::Div:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateFDiv(a, b_val);
                        });
       break;
     case LLVMOpsRecord::Max:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateIntrinsic(Intrinsic::maxnum,
                                                   {a->getType()}, {a, b_val});
                        });
       break;
     case LLVMOpsRecord::Min:
       generateBinaryOp(op, bufferDescPtrs,
-                       [](IRBuilder<> &b, Value *a, Value *b_val) {
+                       [](llvm::IRBuilder<> &b, llvm::Value *a, llvm::Value *b_val) {
                          return b.CreateIntrinsic(Intrinsic::minnum,
                                                   {a->getType()}, {a, b_val});
                        });
       break;
     case LLVMOpsRecord::Neg:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
                         return b.CreateFNeg(a);
                       });
       break;
     case LLVMOpsRecord::Relu:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
-                        auto *zero = ConstantFP::get(a->getType(), 0.0);
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
+                        auto *zero = llvm::ConstantFP::get(a->getType(), 0.0);
                         return b.CreateIntrinsic(Intrinsic::maxnum,
                                                  {a->getType()}, {a, zero});
                       });
       break;
     case LLVMOpsRecord::Sigmoid:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
-                        auto *one = ConstantFP::get(a->getType(), 1.0);
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
+                        auto *one = llvm::ConstantFP::get(a->getType(), 1.0);
                         auto *negA = b.CreateFNeg(a);
                         auto *expNegA = b.CreateIntrinsic(Intrinsic::exp,
                                                           {a->getType()}, {negA});
@@ -977,21 +976,21 @@ private:
       break;
     case LLVMOpsRecord::Tanh:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
                         return b.CreateIntrinsic(Intrinsic::tanh,
                                                  {a->getType()}, {a});
                       });
       break;
     case LLVMOpsRecord::Exp:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
                         return b.CreateIntrinsic(Intrinsic::exp,
                                                  {a->getType()}, {a});
                       });
       break;
     case LLVMOpsRecord::Log:
       generateUnaryOp(op, bufferDescPtrs,
-                      [](IRBuilder<> &b, Value *a) {
+                      [](llvm::IRBuilder<> &b, llvm::Value *a) {
                         return b.CreateIntrinsic(Intrinsic::log,
                                                  {a->getType()}, {a});
                       });
@@ -1015,15 +1014,15 @@ private:
   /// Generate a unary element-wise operation: out[i] = fn(in[i])
   void generateUnaryOp(const LLVMOpsRecord &op,
                        const std::vector<AllocaInst*> &bufferDescPtrs,
-                       std::function<Value*(IRBuilder<>&, Value*)> fn) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+                       std::function<llvm::Value*(llvm::IRBuilder<>&, llvm::Value*)> fn) {
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
     auto *fn_ = builder_.GetInsertBlock()->getParent();
 
     auto *inDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
     auto *outDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
 
     auto *inData = getDataPtr(inDescPtr);
     auto *outData = getDataPtr(outDescPtr);
@@ -1033,8 +1032,8 @@ private:
     auto *bodyBB = BasicBlock::Create(ctx_, "unary.body", fn_);
     auto *endBB = BasicBlock::Create(ctx_, "unary.end", fn_);
 
-    auto *zero = ConstantInt::get(int64Ty, 0);
-    auto *one = ConstantInt::get(int64Ty, 1);
+    auto *zero = llvm::ConstantInt::get(int64Ty, 0);
+    auto *one = llvm::ConstantInt::get(int64Ty, 1);
 
     builder_.CreateBr(loopBB);
 
@@ -1061,17 +1060,17 @@ private:
   /// Generate a binary element-wise operation: out[i] = fn(lhs[i], rhs[i])
   void generateBinaryOp(const LLVMOpsRecord &op,
                         const std::vector<AllocaInst*> &bufferDescPtrs,
-                        std::function<Value*(IRBuilder<>&, Value*, Value*)> fn) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+                        std::function<llvm::Value*(llvm::IRBuilder<>&, llvm::Value*, llvm::Value*)> fn) {
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
     auto *fn_ = builder_.GetInsertBlock()->getParent();
 
     auto *lhsDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
     auto *rhsDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
     auto *outDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
 
     auto *lhsData = getDataPtr(lhsDescPtr);
     auto *rhsData = getDataPtr(rhsDescPtr);
@@ -1088,8 +1087,8 @@ private:
     auto *bodyBB = BasicBlock::Create(ctx_, "binary.body", fn_);
     auto *endBB = BasicBlock::Create(ctx_, "binary.end", fn_);
 
-    auto *zero = ConstantInt::get(int64Ty, 0);
-    auto *one = ConstantInt::get(int64Ty, 1);
+    auto *zero = llvm::ConstantInt::get(int64Ty, 0);
+    auto *one = llvm::ConstantInt::get(int64Ty, 1);
 
     builder_.CreateBr(loopBB);
 
@@ -1104,7 +1103,7 @@ private:
     auto *lhsInRange = builder_.CreateICmpSLT(i, lhsNumElems);
     auto *lhsElemPtr = builder_.CreateGEP(floatTy, lhsData, i);
     auto *lhsVal = builder_.CreateLoad(floatTy, lhsElemPtr);
-    auto *lhsZero = ConstantFP::get(floatTy, 0.0);
+    auto *lhsZero = llvm::ConstantFP::get(floatTy, 0.0);
     auto *a = builder_.CreateSelect(lhsInRange, lhsVal, lhsZero);
 
     // Load rhs[i] with bounds check
@@ -1127,23 +1126,23 @@ private:
   /// Generate a constant operation: fill the output buffer with constant data.
   void generateConstantOp(const LLVMOpsRecord &op,
                           const std::vector<AllocaInst*> &bufferDescPtrs) {
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
     auto *fn_ = builder_.GetInsertBlock()->getParent();
 
     auto *outDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
     auto *outData = getDataPtr(outDescPtr);
 
     if (op.constData.size() == 1) {
       // Scalar constant: store to all elements
       auto *numElems = computeNumElements(outDescPtr);
-      auto *val = ConstantFP::get(floatTy, op.constData[0]);
+      auto *val = llvm::ConstantFP::get(floatTy, op.constData[0]);
 
       auto *loopBB = BasicBlock::Create(ctx_, "const.loop", fn_);
       auto *endBB = BasicBlock::Create(ctx_, "const.end", fn_);
-      auto *zero = ConstantInt::get(int64Ty, 0);
-      auto *one = ConstantInt::get(int64Ty, 1);
+      auto *zero = llvm::ConstantInt::get(int64Ty, 0);
+      auto *one = llvm::ConstantInt::get(int64Ty, 1);
 
       builder_.CreateBr(loopBB);
       builder_.SetInsertPoint(loopBB);
@@ -1164,8 +1163,8 @@ private:
     } else {
       // Tensor constant: store each element
       for (size_t j = 0; j < op.constData.size(); ++j) {
-        auto *idx = ConstantInt::get(int64Ty, j);
-        auto *val = ConstantFP::get(floatTy, op.constData[j]);
+        auto *idx = llvm::ConstantInt::get(int64Ty, j);
+        auto *val = llvm::ConstantFP::get(floatTy, op.constData[j]);
         auto *elemPtr = builder_.CreateGEP(floatTy, outData, idx);
         builder_.CreateStore(val, elemPtr);
       }
@@ -1190,18 +1189,18 @@ private:
   /// uses LLVM loop vectorize hints for auto-vectorization.
   void generateMatMulOp(const LLVMOpsRecord &op,
                         const std::vector<AllocaInst*> &bufferDescPtrs) {
-    auto *int32Ty = Type::getInt32Ty(ctx_);
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
-    auto *voidTy = Type::getVoidTy(ctx_);
-    auto *ptrTy = PointerType::get(ctx_, 0);
+    auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
+    auto *voidTy = llvm::Type::getVoidTy(ctx_);
+    auto *ptrTy = llvm::PointerType::get(ctx_, 0);
 
     auto *lhsDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
     auto *rhsDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input2]);
     auto *outDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
 
     auto *lhsData = getDataPtr(lhsDescPtr);
     auto *rhsData = getDataPtr(rhsDescPtr);
@@ -1216,7 +1215,7 @@ private:
     // void cblas_sgemm(int Order, int TransA, int TransB, int M, int N,
     //                   int K, float alpha, const float *A, int lda,
     //                   const float *B, int ldb, float beta, float *C, int ldc)
-    auto *sgemmFnType = FunctionType::get(
+    auto *sgemmFnType = llvm::FunctionType::get(
         voidTy,
         {int32Ty, int32Ty, int32Ty, int32Ty, int32Ty, int32Ty,
          floatTy, ptrTy, int32Ty, ptrTy, int32Ty, floatTy, ptrTy, int32Ty},
@@ -1235,10 +1234,10 @@ private:
     auto *N32 = builder_.CreateTrunc(N64, int32Ty, "N");
 
     // Constants for cblas_sgemm arguments
-    auto *cblasRowMajor = ConstantInt::get(int32Ty, 101); // CblasRowMajor
-    auto *cblasNoTrans = ConstantInt::get(int32Ty, 111);  // CblasNoTrans
-    auto *alpha = ConstantFP::get(floatTy, 1.0);
-    auto *beta = ConstantFP::get(floatTy, 0.0);           // C = alpha*A*B + beta*C
+    auto *cblasRowMajor = llvm::ConstantInt::get(int32Ty, 101); // CblasRowMajor
+    auto *cblasNoTrans = llvm::ConstantInt::get(int32Ty, 111);  // CblasNoTrans
+    auto *alpha = llvm::ConstantFP::get(floatTy, 1.0);
+    auto *beta = llvm::ConstantFP::get(floatTy, 0.0);           // C = alpha*A*B + beta*C
 
     // Leading dimensions: for row-major [M,K], lda=K; for [K,N], ldb=N; for [M,N], ldc=N
     auto *lda = K32;
@@ -1261,14 +1260,14 @@ private:
     if (static_cast<size_t>(op.input1) >= bufferDescPtrs.size() ||
         static_cast<size_t>(op.output) >= bufferDescPtrs.size()) return;
 
-    auto *int64Ty = Type::getInt64Ty(ctx_);
-    auto *floatTy = Type::getFloatTy(ctx_);
+    auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
+    auto *floatTy = llvm::Type::getFloatTy(ctx_);
     auto *fn_ = builder_.GetInsertBlock()->getParent();
 
     auto *inDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.input1]);
     auto *outDescPtr = builder_.CreateLoad(
-        PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
+        llvm::PointerType::get(descriptorTy_, 0), bufferDescPtrs[op.output]);
     auto *inData = getDataPtr(inDescPtr);
     auto *outData = getDataPtr(outDescPtr);
     auto *numElems = computeNumElements(inDescPtr);
@@ -1277,8 +1276,8 @@ private:
     auto *bodyBB = BasicBlock::Create(ctx_, "copy.body", fn_);
     auto *endBB = BasicBlock::Create(ctx_, "copy.end", fn_);
 
-    auto *zero = ConstantInt::get(int64Ty, 0);
-    auto *one = ConstantInt::get(int64Ty, 1);
+    auto *zero = llvm::ConstantInt::get(int64Ty, 0);
+    auto *one = llvm::ConstantInt::get(int64Ty, 1);
 
     builder_.CreateBr(loopBB);
     builder_.SetInsertPoint(loopBB);

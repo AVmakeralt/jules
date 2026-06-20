@@ -229,7 +229,6 @@ Token Lexer::nextToken() {
   if (!lookahead_.empty()) {
     Token tok = std::move(lookahead_.front());
     lookahead_.erase(lookahead_.begin());
-    curTok_ = tok;
     return tok;
   }
 

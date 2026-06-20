@@ -18,6 +18,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 #include "llvm/ADT/ScopedHashTable.h"
@@ -53,7 +54,7 @@ OwningOpRef<ModuleOp> MLIRGenerator::lowerProgram(Program &program) {
 
   // Lower extern declarations as function declarations without bodies.
   for (auto &ext : program.getExterns()) {
-    auto funcType = lowerType(*ext->getType()).dyn_cast<FunctionType>();
+    auto funcType = lowerType(*ext->getType()).dyn_cast<::mlir::FunctionType>();
     if (!funcType) {
       diag_.error(ext->getLocation(),
                   "extern '" + ext->getName() + "' must have a function type");
@@ -67,7 +68,7 @@ OwningOpRef<ModuleOp> MLIRGenerator::lowerProgram(Program &program) {
   }
 
   // Verify the module.
-  if (failed(verify(*module_))) {
+  if (failed(::mlir::verify(*module_))) {
     diag_.error(SourceLocation{},
                 "MLIR module verification failed after AST lowering");
     return nullptr;
@@ -78,7 +79,7 @@ OwningOpRef<ModuleOp> MLIRGenerator::lowerProgram(Program &program) {
 
 void MLIRGenerator::lowerFunctionDecl(FunctionDecl &fn) {
   // Convert the function type.
-  auto funcType = lowerType(*fn.getType()).dyn_cast<FunctionType>();
+  auto funcType = lowerType(*fn.getType()).dyn_cast<::mlir::FunctionType>();
   if (!funcType) {
     diag_.error(fn.getLocation(),
                 "function '" + fn.getName() + "' must have a function type");
@@ -118,7 +119,7 @@ void MLIRGenerator::lowerFunctionDecl(FunctionDecl &fn) {
     // If lowering failed, create a return with a zero value.
     auto zeroType = funcType.getResult(0);
     auto zero = builder_.create<ConstantOp>(loc,
-        builder_.getFloatAttr(FloatType::getF32(&context_), 0.0));
+        builder_.getFloatAttr(FloatType::getF32(&context_), 0.0), zeroType);
     builder_.create<func::ReturnOp>(loc, zero.getResult());
   }
 
@@ -136,7 +137,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     return builder_.create<ConstantOp>(
         expr.getLocation() == SourceLocation{} ? builder_.getUnknownLoc()
             : builder_.getUnknownLoc(),
-        builder_.getFloatAttr(f64Type, floatExpr.getValue())).getResult();
+        builder_.getFloatAttr(f64Type, floatExpr.getValue()), f64Type).getResult();
   }
 
   case Expr::IntLiteralExpr: {
@@ -144,7 +145,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     auto i64Type = builder_.getIntegerType(64);
     return builder_.create<ConstantOp>(
         builder_.getUnknownLoc(),
-        builder_.getIntegerAttr(i64Type, intExpr.getValue())).getResult();
+        builder_.getIntegerAttr(i64Type, intExpr.getValue()), i64Type).getResult();
   }
 
   case Expr::BoolLiteralExpr: {
@@ -152,15 +153,15 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     auto i1Type = builder_.getIntegerType(1);
     return builder_.create<ConstantOp>(
         builder_.getUnknownLoc(),
-        builder_.getIntegerAttr(i1Type, boolExpr.getValue() ? 1 : 0)).getResult();
+        builder_.getIntegerAttr(i1Type, boolExpr.getValue() ? 1 : 0), i1Type).getResult();
   }
 
   case Expr::UnitLiteralExpr: {
     // Unit values are represented as zero-element tuples or just a constant.
     auto f32Type = builder_.getF32Type();
-    return builder().create<ConstantOp>(
+    return builder_.create<ConstantOp>(
         builder_.getUnknownLoc(),
-        builder_.getFloatAttr(f32Type, 0.0)).getResult();
+        builder_.getFloatAttr(f32Type, 0.0), f32Type).getResult();
   }
 
   case Expr::IdentifierExpr: {
@@ -197,7 +198,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
         {static_cast<int64_t>(elements.size())}, elementType);
     auto denseAttr = DenseFPElementsAttr::get(tensorType, elements);
     return builder_.create<ConstantOp>(builder_.getUnknownLoc(),
-                                       denseAttr).getResult();
+                                       denseAttr, tensorType).getResult();
   }
 
   case Expr::BinaryExpr: {
@@ -215,18 +216,20 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     case BinaryExpr::Div:    return builder_.create<DivOp>(loc, lhs, rhs).getResult();
     case BinaryExpr::Mod:    return builder_.create<ModOp>(loc, lhs, rhs).getResult();
     case BinaryExpr::Pow:    return builder_.create<PowOp>(loc, lhs, rhs).getResult();
-    case BinaryExpr::MatMul: return builder_.create<MatMulOp>(loc, lhs, rhs).getResult();
-    case BinaryExpr::Eq:     return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::MatMul: return builder_.create<MatMulOp>(loc, lhs, rhs,
+                                          builder_.getStringAttr(""),
+                                          builder_.getStringAttr("")).getResult();
+    case BinaryExpr::Eq:     return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("EQ")).getResult();
-    case BinaryExpr::Neq:    return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::Neq:    return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("NE")).getResult();
-    case BinaryExpr::Lt:     return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::Lt:     return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("LT")).getResult();
-    case BinaryExpr::Gt:     return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::Gt:     return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("GT")).getResult();
-    case BinaryExpr::Leq:    return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::Leq:    return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("LE")).getResult();
-    case BinaryExpr::Geq:    return builder_.create<CmpOp>(loc, lhs, rhs,
+    case BinaryExpr::Geq:    return builder_.create<CmpOp>(loc, builder_.getI1Type(), lhs, rhs,
                                               builder_.getStringAttr("GE")).getResult();
     case BinaryExpr::And:
     case BinaryExpr::Or:
@@ -283,7 +286,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
       if (name == "abs")     return builder_.create<AbsOp>(loc, args[0]).getResult();
       if (name == "transpose") return builder_.create<TransposeOp>(loc, args[0]).getResult();
       if (name == "cross_entropy") {
-        return builder_.create<CrossEntropyOp>(loc, args[0], args[1]).getResult();
+        return builder_.create<CrossEntropyOp>(loc, args[0].getType(), args[0], args[1]).getResult();
       }
 
       // Tensor creation functions.
@@ -356,16 +359,11 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     auto stridesAttr = builder_.getI64ArrayAttr(strides);
 
     return builder_.create<SliceOp>(
-        builder_.getUnknownLoc(), object,
-        DenseIntElementsAttr::get(
-            RankedTensorType::get({static_cast<int64_t>(startIndices.size())},
-                                   builder_.getI64Type()), startIndices),
-        DenseIntElementsAttr::get(
-            RankedTensorType::get({static_cast<int64_t>(limitIndices.size())},
-                                   builder_.getI64Type()), limitIndices),
-        DenseIntElementsAttr::get(
-            RankedTensorType::get({static_cast<int64_t>(strides.size())},
-                                   builder_.getI64Type()), strides)).getResult();
+        builder_.getUnknownLoc(), object.getType(),
+        object,
+        builder_.getI64ArrayAttr(startIndices),
+        builder_.getI64ArrayAttr(limitIndices),
+        builder_.getI64ArrayAttr(strides)).getResult();
   }
 
   case Expr::LetExpr: {
@@ -447,7 +445,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     if (!trueVal || !falseVal) return Value();
 
     return builder_.create<SelectOp>(
-        builder_.getUnknownLoc(), cond, trueVal, falseVal).getResult();
+        builder_.getUnknownLoc(), trueVal.getType(), cond, trueVal, falseVal).getResult();
   }
 
   case Expr::BlockExpr: {
@@ -473,7 +471,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
 
     auto targetType = lowerType(*castExpr.getTargetType());
     return builder_.create<CastOp>(
-        builder_.getUnknownLoc(), input,
+        builder_.getUnknownLoc(), targetType, input,
         TypeAttr::get(targetType)).getResult();
   }
 
@@ -483,7 +481,7 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     if (!fnVal) return Value();
 
     return builder_.create<GradOp>(
-        builder_.getUnknownLoc(), fnVal,
+        builder_.getUnknownLoc(), fnVal.getType(), fnVal,
         builder_.getStringAttr(gradExpr.getDiffVar())).getResult();
   }
 

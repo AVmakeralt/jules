@@ -195,7 +195,10 @@ struct CompilationJob {
   int priority = 0;
 
   /// Whether this job has been cancelled.
-  std::atomic<bool> cancelled{false};
+  /// Stored as a shared_ptr so that CompilationJob remains movable
+  /// (std::atomic is neither copyable nor movable). Workers check this
+  /// flag to skip processing for cancelled jobs.
+  std::shared_ptr<std::atomic<bool>> cancelled{std::make_shared<std::atomic<bool>>(false)};
 
   /// Comparison for priority queue (higher priority first).
   bool operator<(const CompilationJob &other) const {
