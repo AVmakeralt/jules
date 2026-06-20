@@ -172,12 +172,13 @@ struct PolyhedralOptPass
     // configuration, and by the affine loop generator below.
 
     funcOp.walk([&](MatMulOp matmulOp) {
+      auto i64Type = IntegerType::get(matmulOp.getContext(), 64);
       matmulOp->setAttr("polyhedral.tile_m",
-                        IntegerAttr::get(matmulOp.getContext(), tileSize.tileSizeM));
+                        IntegerAttr::get(i64Type, tileSize.tileSizeM));
       matmulOp->setAttr("polyhedral.tile_n",
-                        IntegerAttr::get(matmulOp.getContext(), tileSize.tileSizeN));
+                        IntegerAttr::get(i64Type, tileSize.tileSizeN));
       matmulOp->setAttr("polyhedral.tile_k",
-                        IntegerAttr::get(matmulOp.getContext(), tileSize.tileSizeK));
+                        IntegerAttr::get(i64Type, tileSize.tileSizeK));
     });
 
     // ── Phase 2: Loop Fusion ───────────────────────────────────────────────

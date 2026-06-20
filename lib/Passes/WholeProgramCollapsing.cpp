@@ -23,6 +23,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Support/LogicalResult.h"
@@ -170,7 +171,7 @@ private:
                       APFloat::rmNearestTiesToEven, &losingInfo);
       auto denseAttr = DenseFPElementsAttr::get(tensorType, apValue);
       constValue =
-          rewriter.create<ConstantOp>(op.getLoc(), denseAttr).getResult();
+          rewriter.create<ConstantOp>(op.getLoc(), denseAttr, denseAttr.getType()).getResult();
     } else {
       auto floatType = resultType.isa<FloatType>()
                             ? resultType.cast<FloatType>()

@@ -141,35 +141,33 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
   else if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
     // d(a ** b)/da = dL ** transpose(b)
     // d(a ** b)/db = transpose(a) ** dL
-    auto transB = builder.create<TransposeOp>(op->getLoc(), matmulOp.getRhs());
-    auto gradA = builder.create<MatMulOp>(op->getLoc(), incomingAdjoint,
-                                            transB.getResult());
-    auto transA = builder.create<TransposeOp>(op->getLoc(), matmulOp.getLhs());
-    auto gradB = builder.create<MatMulOp>(op->getLoc(), transA.getResult(),
-                                            incomingAdjoint);
+    auto transB = builder.create<TransposeOp>(op->getLoc(), matmulOp.getRhs().getType(), matmulOp.getRhs());
+    auto gradA = builder.create<MatMulOp>(op->getLoc(), incomingAdjoint.getType(), incomingAdjoint, transB.getResult(), ::mlir::StringAttr(), ::mlir::StringAttr());
+    auto transA = builder.create<TransposeOp>(op->getLoc(), matmulOp.getLhs().getType(), matmulOp.getLhs());
+    auto gradB = builder.create<MatMulOp>(op->getLoc(), transA.getResult().getType(), transA.getResult(), incomingAdjoint, ::mlir::StringAttr(), ::mlir::StringAttr());
     addAdjoint(matmulOp.getLhs(), gradA.getResult());
     addAdjoint(matmulOp.getRhs(), gradB.getResult());
   }
   else if (auto reluOp = dyn_cast<ReluOp>(op)) {
     // d(relu(a))/da = relu'(a) = (a > 0) ? 1 : 0
     // Implemented as: grad = dL * (a > 0)
-    auto zero = builder.create<ConstantOp>(
-        op->getLoc(), builder.getFloatAttr(
+    auto zero = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(
             reluOp.getInput().getType().isa<RankedTensorType>()
                 ? FloatType::getF32(builder.getContext())
                 : FloatType::getF32(builder.getContext()),
-            0.0));
-    auto cond = builder.create<CmpOp>(
-        op->getLoc(), reluOp.getInput(), zero.getResult(),
+            0.0), reluOp.getInput().getType().isa<RankedTensorType>()
+                ? FloatType::getF32(builder.getContext())
+                : FloatType::getF32(builder.getContext()));
+    auto cond = builder.create<CmpOp>(op->getLoc(), builder.getI1Type(), reluOp.getInput(), zero.getResult(),
         builder.getStringAttr("GT"));
-    auto one = builder.create<ConstantOp>(
-        op->getLoc(), builder.getFloatAttr(
+    auto one = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(
             reluOp.getInput().getType().isa<RankedTensorType>()
                 ? FloatType::getF32(builder.getContext())
                 : FloatType::getF32(builder.getContext()),
-            1.0));
-    auto mask = builder.create<SelectOp>(
-        op->getLoc(), cond.getResult(), one.getResult(), zero.getResult());
+            1.0), reluOp.getInput().getType().isa<RankedTensorType>()
+                ? FloatType::getF32(builder.getContext())
+                : FloatType::getF32(builder.getContext()));
+    auto mask = builder.create<SelectOp>(op->getLoc(), one.getResult().getType(), cond.getResult(), one.getResult(), zero.getResult());
     auto grad = builder.create<MulOp>(op->getLoc(), incomingAdjoint,
                                        mask.getResult());
     addAdjoint(reluOp.getInput(), grad.getResult());
@@ -177,9 +175,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
   else if (auto sigmoidOp = dyn_cast<SigmoidOp>(op)) {
     // d(sigmoid(a))/da = sigmoid(a) * (1 - sigmoid(a))
     auto sigVal = sigmoidOp.getResult();
-    auto one = builder.create<ConstantOp>(
-        op->getLoc(),
-        builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0));
+    auto one = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0), FloatType::getF32(builder.getContext()));
     auto oneMinusSig = builder.create<SubOp>(op->getLoc(), one.getResult(),
                                               sigVal);
     auto deriv = builder.create<MulOp>(op->getLoc(), sigVal,
@@ -192,9 +188,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
     // d(tanh(a))/da = 1 - tanh(a)^2
     auto tanhVal = tanhOp.getResult();
     auto tanhSquared = builder.create<MulOp>(op->getLoc(), tanhVal, tanhVal);
-    auto one = builder.create<ConstantOp>(
-        op->getLoc(),
-        builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0));
+    auto one = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0), FloatType::getF32(builder.getContext()));
     auto deriv = builder.create<SubOp>(op->getLoc(), one.getResult(),
                                         tanhSquared.getResult());
     auto grad = builder.create<MulOp>(op->getLoc(), incomingAdjoint,
@@ -204,9 +198,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
   else if (auto powOp = dyn_cast<PowOp>(op)) {
     // d(a^b)/da = b * a^(b-1)
     // d(a^b)/db = a^b * log(a)
-    auto one = builder.create<ConstantOp>(
-        op->getLoc(),
-        builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0));
+    auto one = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0), FloatType::getF32(builder.getContext()));
     auto bMinusOne = builder.create<SubOp>(op->getLoc(), powOp.getRhs(),
                                             one.getResult());
     auto aPowBm1 = builder.create<PowOp>(op->getLoc(), powOp.getLhs(),
@@ -236,10 +228,8 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
       for (int64_t dim : inputType.getShape()) {
         if (dim != ShapedType::kDynamic) numElements *= dim;
       }
-      auto invN = builder.create<ConstantOp>(
-          op->getLoc(),
-          builder.getFloatAttr(FloatType::getF32(builder.getContext()),
-                               1.0 / static_cast<double>(numElements)));
+      auto invN = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()),
+                               1.0 / static_cast<double>(numElements)), FloatType::getF32(builder.getContext()));
       auto grad = builder.create<MulOp>(op->getLoc(), incomingAdjoint,
                                          invN.getResult());
       addAdjoint(meanOp.getInput(), grad.getResult());
@@ -255,14 +245,12 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
   }
   else if (auto castOp = dyn_cast<CastOp>(op)) {
     // Gradient flows through cast unchanged (cast back to original type).
-    auto grad = builder.create<CastOp>(
-        op->getLoc(), incomingAdjoint,
-        TypeAttr::get(castOp.getInput().getType()));
+    auto grad = builder.create<CastOp>(op->getLoc(), TypeAttr::get(castOp.getInput().getType()).getValue(), incomingAdjoint, TypeAttr::get(castOp.getInput().getType()));
     addAdjoint(castOp.getInput(), grad.getResult());
   }
   else if (auto transposeOp = dyn_cast<TransposeOp>(op)) {
     // d(transpose(a))/da = transpose(dL)
-    auto grad = builder.create<TransposeOp>(op->getLoc(), incomingAdjoint);
+    auto grad = builder.create<TransposeOp>(op->getLoc(), incomingAdjoint.getType(), incomingAdjoint);
     addAdjoint(transposeOp.getInput(), grad.getResult());
   }
   else if (auto concatOp = dyn_cast<ConcatOp>(op)) {
@@ -316,12 +304,8 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
     auto trueType = selectOp.getTrueValue().getType().dyn_cast<RankedTensorType>();
     if (trueType) {
       auto zeros = builder.create<ZerosOp>(op->getLoc(), trueType);
-      auto gradA = builder.create<SelectOp>(
-          op->getLoc(), selectOp.getCondition(), incomingAdjoint,
-          zeros.getResult());
-      auto gradB = builder.create<SelectOp>(
-          op->getLoc(), selectOp.getCondition(), zeros.getResult(),
-          incomingAdjoint);
+      auto gradA = builder.create<SelectOp>(op->getLoc(), incomingAdjoint.getType(), selectOp.getCondition(), incomingAdjoint, zeros.getResult());
+      auto gradB = builder.create<SelectOp>(op->getLoc(), zeros.getResult().getType(), selectOp.getCondition(), zeros.getResult(), incomingAdjoint);
       addAdjoint(selectOp.getTrueValue(), gradA.getResult());
       addAdjoint(selectOp.getFalseValue(), gradB.getResult());
     }
@@ -395,9 +379,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
     // The adjoint of log is the incoming adjoint divided by the input.
     auto recipInput = builder.create<DivOp>(
         op->getLoc(),
-        builder.create<ConstantOp>(
-            op->getLoc(),
-            builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0))
+        builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()), 1.0), FloatType::getF32(builder.getContext()))
             .getResult(),
         logOp.getInput());
     auto grad = builder.create<MulOp>(op->getLoc(), incomingAdjoint,
@@ -643,9 +625,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
         initAdjointValues.push_back(zeroAdjoint.getResult());
       } else {
         // Scalar: create a constant zero.
-        auto zeroVal = builder.create<ConstantOp>(
-            op->getLoc(),
-            builder.getFloatAttr(FloatType::getF32(builder.getContext()), 0.0));
+        auto zeroVal = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(FloatType::getF32(builder.getContext()), 0.0), FloatType::getF32(builder.getContext()));
         initAdjointValues.push_back(zeroVal.getResult());
       }
     }
@@ -765,9 +745,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
     // Since we can't determine it statically, we use an attribute marker
     // that will be filled in at runtime or by a profile-guided pass.
     // For now, use 0 as a placeholder (the real trip count is unknown).
-    auto initCounter = builder.create<ConstantOp>(
-        op->getLoc(),
-        builder.getIntegerAttr(builder.getI64Type(), 0));
+    auto initCounter = builder.create<ConstantOp>(op->getLoc(), builder.getIntegerAttr(builder.getI64Type(), 0), builder.getI64Type());
 
     // Build the operands for the reverse while: [counter, adj_0, ..., adj_N-1]
     SmallVector<Value, 4> reverseWhileOperands;
@@ -803,19 +781,15 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
       auto counterVal = condBlock.getArgument(0);
 
       // Create a zero constant for comparison.
-      auto zeroI64 = builder.create<ConstantOp>(
-          op->getLoc(),
-          builder.getIntegerAttr(builder.getI64Type(), 0));
+      auto zeroI64 = builder.create<ConstantOp>(op->getLoc(), builder.getIntegerAttr(builder.getI64Type(), 0), builder.getI64Type());
 
       // Compare counter > 0.
-      auto cmpResult = builder.create<CmpOp>(
-          op->getLoc(), counterVal, zeroI64.getResult(),
+      auto cmpResult = builder.create<CmpOp>(op->getLoc(), builder.getI1Type(), counterVal, zeroI64.getResult(),
           builder.getStringAttr("GT"));
 
       // The condition region returns a boolean (i1 or tensor<i1>).
       // We yield the comparison result as the condition.
-      builder.create<CmpOp>(
-          op->getLoc(), counterVal, zeroI64.getResult(),
+      builder.create<CmpOp>(op->getLoc(), builder.getI1Type(), counterVal, zeroI64.getResult(),
           builder.getStringAttr("GT"));
     }
 
@@ -833,9 +807,7 @@ void computeAdjointForOp(Operation *op, Value incomingAdjoint,
 
       // Decrement counter: new_counter = counter - 1
       auto counterVal = bodyBlock.getArgument(0);
-      auto oneI64 = builder.create<ConstantOp>(
-          op->getLoc(),
-          builder.getIntegerAttr(builder.getI64Type(), 1));
+      auto oneI64 = builder.create<ConstantOp>(op->getLoc(), builder.getIntegerAttr(builder.getI64Type(), 1), builder.getI64Type());
       auto newCounter = builder.create<SubOp>(
           op->getLoc(), counterVal, oneI64.getResult());
 
@@ -882,13 +854,13 @@ Value AutodiffEngine::differentiate(Value output, Value input,
   auto forwardOps = traceForwardGraph(output, input);
 
   // Step 2: Initialize the adjoint of the output to 1.0 (the seed).
-  auto seed = builder.create<ConstantOp>(
-      output.getLoc(),
-      builder.getFloatAttr(
+  auto seed = builder.create<ConstantOp>(output.getLoc(), builder.getFloatAttr(
           output.getType().isa<RankedTensorType>()
               ? output.getType().cast<RankedTensorType>().getElementType()
               : FloatType::getF32(builder.getContext()),
-          1.0));
+          1.0), output.getType().isa<RankedTensorType>()
+              ? output.getType().cast<RankedTensorType>().getElementType()
+              : FloatType::getF32(builder.getContext()));
 
   adjoints_[output] = seed.getResult();
 
@@ -912,13 +884,13 @@ Value AutodiffEngine::differentiate(Value output, Value input,
 
   // If the input doesn't have an adjoint (e.g. it wasn't on the computation
   // path), return zero.
-  auto zeroGrad = builder.create<ConstantOp>(
-      input.getLoc(),
-      builder.getFloatAttr(
+  auto zeroGrad = builder.create<ConstantOp>(input.getLoc(), builder.getFloatAttr(
           input.getType().isa<RankedTensorType>()
               ? input.getType().cast<RankedTensorType>().getElementType()
               : FloatType::getF32(builder.getContext()),
-          0.0));
+          0.0), input.getType().isa<RankedTensorType>()
+              ? input.getType().cast<RankedTensorType>().getElementType()
+              : FloatType::getF32(builder.getContext()));
   return zeroGrad.getResult();
 }
 
@@ -1031,7 +1003,8 @@ struct ShapeInferencePass
         SmallVector<Type, 1> inferredTypes;
         auto result = inferInterface.inferReturnTypes(
             op->getContext(), op->getLoc(), op->getOperands(),
-            op->getAttrDictionary(), op->getRegions(), inferredTypes);
+            op->getAttrDictionary(), op->getPropertiesStorage(),
+            op->getRegions(), inferredTypes);
 
         if (failed(result)) return;
 

@@ -24,6 +24,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallVector.h"
 
 using namespace mlir;
@@ -173,9 +174,8 @@ struct PowerIdentityPattern : public OpRewritePattern<PowOp> {
           if (resultType) {
             rewriter.replaceOpWithNewOp<OnesOp>(op, resultType);
           } else {
-            auto one = rewriter.create<ConstantOp>(
-                op.getLoc(), rewriter.getFloatAttr(
-                    op.getResult().getType(), 1.0));
+            auto one = rewriter.create<ConstantOp>(op.getLoc(), rewriter.getFloatAttr(
+                    op.getResult().getType(), 1.0), op.getResult().getType());
             rewriter.replaceOp(op, one.getResult());
           }
           return success();

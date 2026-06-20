@@ -47,6 +47,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 
 // MLIR conversion passes
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
@@ -58,6 +59,7 @@
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/Passes.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 
 // LLVM includes
@@ -754,7 +756,7 @@ private:
   llvm::Value *computeNumElements(llvm::Value *descPtr) {
     auto *int64Ty = llvm::Type::getInt64Ty(ctx_);
     auto *int32Ty = llvm::Type::getInt32Ty(ctx_);
-    auto *total = llvm::ConstantInt::get(int64Ty, 1);
+    llvm::Value *total = llvm::ConstantInt::get(int64Ty, 1);
     auto *rank = getRank(descPtr);
 
     // Loop over dimensions 0..5, multiply if dim < rank
@@ -1379,21 +1381,19 @@ struct LLVMBackend::Impl {
     context->getOrLoadDialect<bufferization::BufferizationDialect>();
 
     // Build the lowering pass pipeline
-    PassManager pm(context);
+    ::mlir::PassManager pm(context);
 
     // Step 1: Bufferization (tensors → memref)
     // One-shot bufferize converts tensor ops to memref ops in-place
-    pm.addPass(bufferization::createBufferizePass());
+    pm.addPass(bufferization::createOneShotBufferizePass());
 
     // Step 2: SCF → ControlFlow (needed before CF → LLVM)
     pm.addPass(createConvertSCFToCFPass());
 
     // Step 3: Lower arith/math to LLVM dialect
-    // Use the combined arith+math+func→LLVM conversion pass
-    LowerToLLVMOptions llvmOptions(context);
-    pm.addPass(createConvertArithToLLVMPass());
+    pm.addPass(createArithToLLVMConversionPass());
     pm.addPass(createConvertMathToLLVMPass());
-    pm.addPass(createConvertFuncToLLVMPass(llvmOptions));
+    pm.addPass(createConvertFuncToLLVMPass());
     pm.addPass(createFinalizeMemRefToLLVMConversionPass());
     pm.addPass(createConvertControlFlowToLLVMPass());
     pm.addPass(createConvertIndexToLLVMPass());

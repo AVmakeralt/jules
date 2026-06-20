@@ -248,9 +248,10 @@ mlir::Value MLIRGenerator::lowerExpr(Expr &expr) {
     case UnaryExpr::Negate:
       return builder_.create<NegOp>(builder_.getUnknownLoc(), operand).getResult();
     case UnaryExpr::Not: {
+      auto i1Type = builder_.getIntegerType(1);
       auto one = builder_.create<ConstantOp>(
           builder_.getUnknownLoc(),
-          builder_.getIntegerAttr(builder_.getIntegerType(1), 1)).getResult();
+          builder_.getIntegerAttr(i1Type, 1), i1Type).getResult();
       return builder_.create<SubOp>(builder_.getUnknownLoc(), one, operand).getResult();
     }
     }

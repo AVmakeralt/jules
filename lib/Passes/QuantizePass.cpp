@@ -31,6 +31,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LogicalResult.h"
@@ -57,7 +58,7 @@ void computeSymmetricQuantParams(DenseFPElementsAttr tensorAttr,
                                   double &scale,
                                   int64_t &zeroPoint) {
   double maxAbs = 0.0;
-  for (auto &elem : tensorAttr) {
+  for (auto elem : tensorAttr) {
     double val = std::abs(elem.convertToDouble());
     if (val > maxAbs) maxAbs = val;
   }
@@ -76,7 +77,7 @@ void computeAsymmetricQuantParams(DenseFPElementsAttr tensorAttr,
   double minVal = std::numeric_limits<double>::max();
   double maxVal = std::numeric_limits<double>::lowest();
 
-  for (auto &elem : tensorAttr) {
+  for (auto elem : tensorAttr) {
     double val = elem.convertToDouble();
     if (val < minVal) minVal = val;
     if (val > maxVal) maxVal = val;
@@ -116,7 +117,7 @@ void computePerChannelQuantParams(DenseFPElementsAttr tensorAttr,
   // Flatten the tensor elements.
   SmallVector<double, 128> values;
   values.reserve(tensorAttr.getNumElements());
-  for (auto &elem : tensorAttr) {
+  for (auto elem : tensorAttr) {
     values.push_back(elem.convertToDouble());
   }
 
@@ -254,12 +255,15 @@ private:
   bool perChannelValue_ = true;
   bool inferenceModeOverride_ = false;
 
+public:
   // Accessor methods for programmatic configuration
   void setQuantizeWeights(bool val) { quantizeWeightsOverride_ = true; quantizeWeightsValue_ = val; }
   void setQuantizeActivations(bool val) { quantizeActivationsOverride_ = true; quantizeActivationsValue_ = val; }
   void setNumBits(unsigned val) { numBitsOverride_ = 1; numBitsValue_ = val; }
   void setPerChannel(bool val) { perChannelOverride_ = true; perChannelValue_ = val; }
   void setInferenceMode(bool val) { inferenceModeOverride_ = true; inferenceMode_ = val; }
+
+private:
 
   bool shouldQuantizeWeights() const {
     return quantizeWeightsOverride_ ? quantizeWeightsValue_ : (bool)quantizeWeights;
@@ -446,7 +450,7 @@ private:
 
         SmallVector<APFloat, 64> values;
         values.reserve(inputTensor.getNumElements());
-        for (auto &elem : inputTensor) {
+        for (auto elem : inputTensor) {
           values.push_back(elem);
         }
 
@@ -475,7 +479,7 @@ private:
 
         SmallVector<APFloat, 64> values;
         values.reserve(inputTensor.getNumElements());
-        for (auto &elem : inputTensor) {
+        for (auto elem : inputTensor) {
           values.push_back(elem);
         }
 
@@ -523,9 +527,7 @@ private:
           RankedTensorType::get(inputType.getShape(), int8Type);
 
       // Insert cast to int8 (quantize).
-      auto castOp = builder.create<CastOp>(
-          fakeQuantOp->getLoc(), input,
-          TypeAttr::get(quantizedType));
+      auto castOp = builder.create<CastOp>(fakeQuantOp->getLoc(), TypeAttr::get(quantizedType).getValue(), input, TypeAttr::get(quantizedType));
 
       // For inference, we don't cast back to float immediately.
       // Instead, we keep the int8 tensor and let the downstream matmul
@@ -552,9 +554,7 @@ private:
         fakeQuantOp->erase();
       } else {
         // Fallback: dequantize back to float (old behavior)
-        auto dequantOp = builder.create<CastOp>(
-            fakeQuantOp->getLoc(), castOp.getResult(),
-            TypeAttr::get(inputType));
+        auto dequantOp = builder.create<CastOp>(fakeQuantOp->getLoc(), TypeAttr::get(inputType).getValue(), castOp.getResult(), TypeAttr::get(inputType));
 
         fakeQuantOp->getResult(0).replaceAllUsesWith(dequantOp.getResult());
         fakeQuantOp->erase();

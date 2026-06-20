@@ -221,7 +221,7 @@ Value createSimplifiedConstant(OpBuilder &builder, Location loc,
   auto attr = builder.getFloatAttr(floatType.isa<FloatType>() ? floatType
                                                               : FloatType::getF32(builder.getContext()),
                                    value);
-  return builder.create<ConstantOp>(loc, attr);
+  return builder.create<ConstantOp>(loc, attr, attr.getType());
 }
 
 /// Simplified multiplication: applies collapsing rules at construction time.
@@ -314,7 +314,7 @@ Value simplifiedTranspose(OpBuilder &builder, Location loc, Value input) {
     // transpose(transpose(x)) -> x
     return inner;
   }
-  return builder.create<TransposeOp>(loc, input);
+  return builder.create<TransposeOp>(loc, input.getType(), input);
 }
 
 /// Simplified division: applies collapsing rules at construction time.
@@ -568,13 +568,13 @@ private:
     if (auto matmulOp = dyn_cast<MatMulOp>(op)) {
       if (neededValues.count(matmulOp.getLhs())) {
         Value transB = simplifiedTranspose(builder, loc, matmulOp.getRhs());
-        Value gradA = builder.create<MatMulOp>(loc, incomingAdjoint, transB);
+        auto gradA = builder.create<MatMulOp>(loc, incomingAdjoint.getType(), incomingAdjoint, transB, ::mlir::StringAttr(), ::mlir::StringAttr());
         accumulateAdjoint(adjoints, matmulOp.getLhs(), gradA.getResult(),
                           builder, loc);
       }
       if (neededValues.count(matmulOp.getRhs())) {
         Value transA = simplifiedTranspose(builder, loc, matmulOp.getLhs());
-        Value gradB = builder.create<MatMulOp>(loc, transA, incomingAdjoint);
+        auto gradB = builder.create<MatMulOp>(loc, transA.getType(), transA, incomingAdjoint, ::mlir::StringAttr(), ::mlir::StringAttr());
         accumulateAdjoint(adjoints, matmulOp.getRhs(), gradB.getResult(),
                           builder, loc);
       }
@@ -589,12 +589,11 @@ private:
       if (neededValues.count(reluOp.getInput())) {
         auto zeroVal = createSimplifiedConstant(builder, loc, 0.0,
                                                 reluOp.getInput().getType());
-        auto cond = builder.create<CmpOp>(loc, reluOp.getInput(), zeroVal,
+        auto cond = builder.create<CmpOp>(loc, builder.getI1Type(), reluOp.getInput(), zeroVal,
                                            builder.getStringAttr("GT"));
         auto oneVal = createSimplifiedConstant(builder, loc, 1.0,
                                                reluOp.getInput().getType());
-        auto mask = builder.create<SelectOp>(loc, cond.getResult(),
-                                              oneVal, zeroVal);
+        auto mask = builder.create<SelectOp>(loc, oneVal.getType(), cond.getResult(), oneVal, zeroVal);
         Value grad = simplifiedMul(builder, loc, incomingAdjoint,
                                     mask.getResult());
         accumulateAdjoint(adjoints, reluOp.getInput(), grad, builder, loc);
@@ -610,7 +609,7 @@ private:
         Value sigVal = sigmoidOp.getResult();
         Value oneVal = createSimplifiedConstant(builder, loc, 1.0,
                                                 sigVal.getType());
-        Value oneMinusSig = builder.create<SubOp>(loc, oneVal, sigVal);
+        auto oneMinusSig = builder.create<SubOp>(loc, oneVal, sigVal);
         Value deriv = simplifiedMul(builder, loc, sigVal,
                                      oneMinusSig.getResult());
         Value grad = simplifiedMul(builder, loc, incomingAdjoint, deriv);
@@ -645,8 +644,8 @@ private:
                                               powOp.getLhs().getType());
       if (neededValues.count(powOp.getLhs())) {
         // dL/da = dL * b * a^(b-1)
-        Value bMinusOne = builder.create<SubOp>(loc, powOp.getRhs(), oneVal);
-        Value aPowBm1 = builder.create<PowOp>(loc, powOp.getLhs(),
+        auto bMinusOne = builder.create<SubOp>(loc, powOp.getRhs(), oneVal);
+        auto aPowBm1 = builder.create<PowOp>(loc, powOp.getLhs(),
                                                bMinusOne.getResult());
         Value bTimesPow = simplifiedMul(builder, loc, powOp.getRhs(),
                                          aPowBm1.getResult());
@@ -657,7 +656,7 @@ private:
       if (neededValues.count(powOp.getRhs())) {
         // dL/db = dL * a^b * log(a)
         Value aPowB = powOp.getResult();
-        Value logA = builder.create<LogOp>(loc, powOp.getLhs());
+        auto logA = builder.create<LogOp>(loc, powOp.getLhs());
         Value aPowBLogA = simplifiedMul(builder, loc, aPowB,
                                          logA.getResult());
         Value gradB = simplifiedMul(builder, loc, incomingAdjoint,
@@ -716,9 +715,7 @@ private:
     // Gradient flows through cast unchanged.
     if (auto castOp = dyn_cast<CastOp>(op)) {
       if (neededValues.count(castOp.getInput())) {
-        auto grad = builder.create<CastOp>(
-            loc, incomingAdjoint,
-            TypeAttr::get(castOp.getInput().getType()));
+        auto grad = builder.create<CastOp>(loc, TypeAttr::get(castOp.getInput().getType()).getValue(), incomingAdjoint, TypeAttr::get(castOp.getInput().getType()));
         accumulateAdjoint(adjoints, castOp.getInput(), grad.getResult(),
                           builder, loc);
       }
@@ -818,16 +815,14 @@ private:
           selectOp.getTrueValue().getType().dyn_cast<RankedTensorType>();
       if (trueType) {
         if (neededValues.count(selectOp.getTrueValue())) {
-          Value zeros = builder.create<ZerosOp>(loc, trueType);
-          Value gradA = builder.create<SelectOp>(
-              loc, selectOp.getCondition(), incomingAdjoint, zeros);
+          auto zeros = builder.create<ZerosOp>(loc, trueType);
+          auto gradA = builder.create<SelectOp>(loc, incomingAdjoint.getType(), selectOp.getCondition(), incomingAdjoint, zeros);
           accumulateAdjoint(adjoints, selectOp.getTrueValue(),
                             gradA.getResult(), builder, loc);
         }
         if (neededValues.count(selectOp.getFalseValue())) {
-          Value zeros = builder.create<ZerosOp>(loc, trueType);
-          Value gradB = builder.create<SelectOp>(
-              loc, selectOp.getCondition(), zeros, incomingAdjoint);
+          auto zeros = builder.create<ZerosOp>(loc, trueType);
+          auto gradB = builder.create<SelectOp>(loc, zeros.getType(), selectOp.getCondition(), zeros, incomingAdjoint);
           accumulateAdjoint(adjoints, selectOp.getFalseValue(),
                             gradB.getResult(), builder, loc);
         }
@@ -844,7 +839,7 @@ private:
         auto inputType =
             sliceOp.getInput().getType().dyn_cast<RankedTensorType>();
         if (inputType) {
-          Value zerosGrad = builder.create<ZerosOp>(loc, inputType);
+          auto zerosGrad = builder.create<ZerosOp>(loc, inputType);
           accumulateAdjoint(adjoints, sliceOp.getInput(), zerosGrad,
                             builder, loc);
         }

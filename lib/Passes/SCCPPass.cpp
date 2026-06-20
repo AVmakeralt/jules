@@ -40,6 +40,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -395,11 +396,9 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           }
 
           builder.setInsertionPoint(op);
-          auto constOp = builder.create<ConstantOp>(
-              op->getLoc(),
-              builder.getFloatAttr(
+          auto constOp = builder.create<ConstantOp>(op->getLoc(), builder.getFloatAttr(
                   attrType.isa<FloatType>() ? attrType : builder.getF32Type(),
-                  constVal));
+                  constVal), attrType.isa<FloatType>() ? attrType : builder.getF32Type());
 
           result.replaceAllUsesWith(constOp.getResult());
         } else if (it->second.isTensorConstant()) {
@@ -429,7 +428,7 @@ struct SCCPPass : public PassWrapper<SCCPPass, OperationPass<ModuleOp>> {
           }
 
           builder.setInsertionPoint(op);
-          auto constOp = builder.create<ConstantOp>(op->getLoc(), finalVal);
+          auto constOp = builder.create<ConstantOp>(op->getLoc(), finalVal, finalVal.getType());
           result.replaceAllUsesWith(constOp.getResult());
         }
       }

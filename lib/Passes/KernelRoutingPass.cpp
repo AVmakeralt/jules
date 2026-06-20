@@ -30,6 +30,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -148,9 +149,9 @@ struct KernelRoutingPass
 
           auto kernelOp = builder.create<ExternKernelOp>(
               matmulOp.getLoc(),
+              /*resultTypes=*/TypeRange{resultType},
               /*kernel_name=*/builder.getStringAttr(kernelName),
-              /*inputs=*/ValueRange{matmulOp.getLhs(), matmulOp.getRhs()},
-              /*resultTypes=*/TypeRange{resultType});
+              /*inputs=*/ValueRange{matmulOp.getLhs(), matmulOp.getRhs()});
 
           // Add backend_config with activation type
           kernelOp->setAttr("jules.kernel.activation",
@@ -192,9 +193,9 @@ struct KernelRoutingPass
 
         auto kernelOp = builder.create<ExternKernelOp>(
             matmulOp.getLoc(),
+            TypeRange{resultType},
             builder.getStringAttr(kernelName),
-            ValueRange{matmulOp.getLhs(), matmulOp.getRhs(), biasValue},
-            TypeRange{resultType});
+            ValueRange{matmulOp.getLhs(), matmulOp.getRhs(), biasValue});
 
         kernelOp->setAttr("jules.kernel.activation",
                          StringAttr::get(ctx, activation));
@@ -256,9 +257,9 @@ struct KernelRoutingPass
                 OpBuilder builder(divOp);
                 auto kernelOp = builder.create<ExternKernelOp>(
                     divOp.getLoc(),
+                    TypeRange{divOp.getResult().getType()},
                     builder.getStringAttr("fusedSoftmax"),
-                    ValueRange{softmaxInput},
-                    TypeRange{divOp.getResult().getType()});
+                    ValueRange{softmaxInput});
 
                 kernelOp->setAttr("jules.kernel.fused",
                                  BoolAttr::get(ctx, true));
@@ -282,9 +283,9 @@ struct KernelRoutingPass
         OpBuilder builder(geluOp);
         auto kernelOp = builder.create<ExternKernelOp>(
             geluOp.getLoc(),
+            TypeRange{resultType},
             builder.getStringAttr("fusedGelu"),
-            ValueRange{geluOp.getInput()},
-            TypeRange{resultType});
+            ValueRange{geluOp.getInput()});
         kernelOp->setAttr("jules.kernel.fused",
                          BoolAttr::get(ctx, true));
         geluOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
@@ -325,9 +326,9 @@ struct KernelRoutingPass
               OpBuilder builder(divOp);
               auto kernelOp = builder.create<ExternKernelOp>(
                   divOp.getLoc(),
+                  TypeRange{divOp.getResult().getType()},
                   builder.getStringAttr("fusedLayerNorm"),
-                  ValueRange{subOp.getLhs()},
-                  TypeRange{divOp.getResult().getType()});
+                  ValueRange{subOp.getLhs()});
               kernelOp->setAttr("jules.kernel.fused",
                                BoolAttr::get(ctx, true));
               divOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
@@ -373,9 +374,9 @@ struct KernelRoutingPass
             OpBuilder builder(meanOp);
             auto kernelOp = builder.create<ExternKernelOp>(
                 meanOp.getLoc(),
+                TypeRange{meanOp.getResult().getType()},
                 builder.getStringAttr("fusedCrossEntropyLoss"),
-                ValueRange{logOp.getInput()},
-                TypeRange{meanOp.getResult().getType()});
+                ValueRange{logOp.getInput()});
             kernelOp->setAttr("jules.kernel.fused",
                              BoolAttr::get(ctx, true));
             meanOp.getResult().replaceAllUsesWith(kernelOp.getResult(0));
@@ -404,9 +405,9 @@ struct KernelRoutingPass
           OpBuilder builder(matmulOp);
           auto kernelOp = builder.create<ExternKernelOp>(
               matmulOp.getLoc(),
+              TypeRange{matmulOp.getResult().getType()},
               builder.getStringAttr("matmulInt8"),
-              ValueRange{matmulOp.getLhs(), matmulOp.getRhs()},
-              TypeRange{matmulOp.getResult().getType()});
+              ValueRange{matmulOp.getLhs(), matmulOp.getRhs()});
 
           kernelOp->setAttr("jules.kernel.int8",
                            BoolAttr::get(ctx, true));
