@@ -23,6 +23,10 @@
 #include "jules/Kernel/ExecutionArena.h"
 #include "jules/Kernel/TilePlanner.h"
 
+#include <atomic>
+#include <mutex>
+#include <string>
+
 #include <algorithm>
 #include <cblas.h>
 #include <cfloat>
@@ -745,7 +749,12 @@ float fusedCrossEntropyLoss(const float* logits, const int32_t* targets,
     float total_loss = 0.0f;
 
 #if defined(__AVX512F__)
-    JULES_OMP_PARALLEL_FOR
+    // PERF (#5): Use omp reduction(+:total_loss) instead of JULES_OMP_CRITICAL
+    // for the loss accumulation. The critical section serializes all threads
+    // on every iteration; the reduction does a tree-reduction at the end.
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic) reduction(+:total_loss)
+#endif
     for (int i = 0; i < M; ++i) {
         const float* row = logits + i * N;
         float* grad_row = grad + i * N;
@@ -789,12 +798,14 @@ float fusedCrossEntropyLoss(const float* logits, const int32_t* targets,
         grad_row[target] -= 1.0f;
         for (j = 0; j < N; j++) grad_row[j] /= M;
 
-        // Thread-safe accumulation of loss
-        JULES_OMP_CRITICAL
+        // PERF (#5): reduction(+:total_loss) handles accumulation; no critical needed
         total_loss += row_loss;
     }
 #else
-    JULES_OMP_PARALLEL_FOR
+    // PERF (#5): same fix for the non-AVX-512 fallback path
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic) reduction(+:total_loss)
+#endif
     for (int i = 0; i < M; ++i) {
         const float* row = logits + i * N;
         float* grad_row = grad + i * N;
@@ -816,7 +827,6 @@ float fusedCrossEntropyLoss(const float* logits, const int32_t* targets,
         grad_row[target] -= 1.0f;
         for (int j = 0; j < N; j++) grad_row[j] /= M;
 
-        JULES_OMP_CRITICAL
         total_loss += row_loss;
     }
 #endif
